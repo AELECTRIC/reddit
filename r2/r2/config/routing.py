@@ -86,7 +86,7 @@ def make_map():
     mc('/subreddits/search', controller='front', action='search_reddits')
     mc('/subreddits/login', controller='forms', action='login')
     mc('/subreddits/:where', controller='reddits', action='listing',
-       where='popular', requirements=dict(where="popular|new|banned|employee|gold"))
+       where='popular', requirements=dict(where="popular|new|banned|employee|gold|default"))
     # If no subreddit is specified, might as well show a list of 'em.
     mc('/r', controller='redirect', action='redirect', dest='/subreddits')
 
@@ -231,6 +231,8 @@ def make_map():
     mc('/framebuster/:blah', controller='front', action='framebuster')
     mc('/framebuster/:what/:blah',
        controller='front', action='framebuster')
+
+    mc('/share/close', controller='front', action='share_close')
 
     # sponsor endpoints
     mc('/sponsor/report', controller='sponsor', action='report')
@@ -385,7 +387,7 @@ def make_map():
                                  "edit_campaign|delete_campaign|"
                                  "add_roadblock|rm_roadblock|check_inventory|"
                                  "refund_campaign|terminate_campaign|"
-                                 "review_fraud|create_promo")))
+                                 "review_fraud|create_promo|link_mobile_ad_image")))
     mc('/api/:action', controller='apiminimal',
        requirements=dict(action="new_captcha"))
     mc('/api/:type', controller='api',
@@ -419,6 +421,8 @@ def make_map():
        requirements=dict(action="authorize"))
     mc("/api/v1/:action", controller="oauth2access",
        requirements=dict(action="access_token|revoke_token"))
+    mc("/api/v1/:action", controller="apiv1scopes",
+       requirements=dict(action="scopes"))
     mc("/api/v1/user/:username/trophies",
        controller="apiv1user", action="usertrophies")
     mc("/api/v1/:action", controller="apiv1user")
@@ -451,8 +455,6 @@ def make_map():
 
     mc('/mobile', controller='redirect', action='redirect',
        dest='http://m.reddit.com/')
-
-    mc('/authorize_embed', controller='front', action='authorize_embed')
 
     # Used for showing ads
     mc("/ads/", controller="ad", action="ad")

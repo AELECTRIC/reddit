@@ -61,7 +61,7 @@
   <% menu = CommentSortMenu() %>
   <select name="default_comment_sort">
         %for sort in menu.visible_options():
-        <option ${'selected="selected"' if sort == c.user.default_comment_sort else ""}
+        <option ${'selected="selected"' if sort == c.user.pref_default_comment_sort else ""}
                 value="${sort}">
           ${menu.make_title(sort)}&#32;${_('(recommended)') if sort == menu._default else ''}
         </option>
@@ -89,7 +89,7 @@
 
 %if c.user_is_loggedin:
   %if thing.done:
-    <p class="error">${_("your preferences have been updated")}</p>
+    <p class="green">${_("your preferences have been updated")}</p>
   %elif thing.error_style_override:
     <p class="error">${_("we couldn't save the custom stylesheet preference. please see the error below")}</p>
   %elif thing.generic_error:
@@ -186,11 +186,11 @@
           ${_("(such as the source subreddit or the content author's url/name)")}
         </span>
       </p>
-      <p>${checkbox(_("don't show links after I've liked them"), "hide_ups")}
+      <p>${checkbox(_("don't show me submissions after I've upvoted them"), "hide_ups")}
          &#32;
          <span class="details">${_("(except my own)")}</span>
       </p>
-      <p>${checkbox(_("don't show links after I've disliked them"), "hide_downs")}
+      <p>${checkbox(_("don't show me submissions after I've downvoted them"), "hide_downs")}
          &#32;
          <span class="details">${_("(except my own)")}</span>
       </p>
@@ -315,8 +315,8 @@
       &#32;
       <span class="details">
         <%
-           link1 = format_html('&#32;<a href="/user/%s/liked">/user/%s/liked</a>&#32;', c.user.name, c.user.name)
-           link2 = format_html('&#32;<a href="/user/%s/disliked">/user/%s/disliked</a>', c.user.name, c.user.name)
+           link1 = format_html('&#32;<a href="/user/%s/upvoted">/user/%s/upvoted</a>&#32;', c.user.name, c.user.name)
+           link2 = format_html('&#32;<a href="/user/%s/downvoted">/user/%s/downvoted</a>', c.user.name, c.user.name)
            %>
         (${_wsf("let everyone see %(link1)s and %(link2)s", link1=link1, link2=link2)})
       </span>
@@ -340,6 +340,23 @@
       </span>
     </td>
   </tr>
+  % if feature.is_enabled('beta_opt_in'):
+  <tr>
+    <th>${_("beta options")}</th>
+    <td class="prefright">
+      ${checkbox(_("I would like to beta test features for reddit"), "beta")}
+      &#32;
+      <span class="details">
+        <%
+          beta_sr_link = format_html('&#32;<a href="/r/%s">/r/%s</a>&#32;', g.beta_sr, g.beta_sr)
+        %>
+        (${_wsf("by enabling you'll be subscribed to %(beta_sr_link)s automatically.", beta_sr_link=beta_sr_link)}
+          &#32;
+          <a href="/r/${g.beta_sr}/wiki">${_("details on the /r/{beta_sr} wiki").format(beta_sr=g.beta_sr)}</a>)
+      </span>
+    </td>
+  </tr>
+  %endif
   %endif
 
   %if c.user.gold:

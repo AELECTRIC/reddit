@@ -47,6 +47,8 @@ from pylons import g
 
 from r2.lib import amqp
 from r2.lib.db import queries
+from r2.lib.filters import _force_unicode
+from r2.lib.menus import CommentSortMenu
 from r2.lib.utils import (
     TimeoutFunction,
     TimeoutFunctionException,
@@ -84,20 +86,24 @@ DISCLAIMER = "*I am a bot, and this action was performed automatically. Please [
 rules_by_subreddit = {}
 
 unnumbered_placeholders_regex = re.compile(r"\{\{(match(?:-[^\d-]+?)?)\}\}")
-match_placeholders_regex = re.compile(r"\{\{match-(?:(.+?)-)?(\d+)\}\}")
+match_placeholders_regex = re.compile(r"\{\{match-(?:([^}]+?)-)?(\d+)\}\}")
 def replace_placeholders(string, data, matches):
     """Replace placeholders in the string with appropriate values."""
     item = data["item"]
     replacements = {
         "{{author}}": data["author"].name,
         "{{body}}": getattr(item, "body", ""),
-        "{{permalink}}": item.make_permalink_slow(),
         "{{subreddit}}": data["subreddit"].name,
     }
 
     if isinstance(item, Comment):
+        context = None
+        if item.parent_id:
+            context = 3
         replacements.update({
             "{{kind}}": "comment",
+            "{{permalink}}": item.make_permalink_slow(
+                context=context, force_domain=True),
             "{{title}}": data["link"].title,
         })
         media_item = data["link"]
@@ -105,6 +111,7 @@ def replace_placeholders(string, data, matches):
         replacements.update({
             "{{kind}}": "submission",
             "{{domain}}": item.link_domain(),
+            "{{permalink}}": item.make_permalink_slow(force_domain=True),
             "{{title}}": item.title,
             "{{url}}": item.url,
         })
@@ -121,7 +128,7 @@ def replace_placeholders(string, data, matches):
             })
 
     for placeholder, replacement in replacements.iteritems():
-        string = string.replace(placeholder, replacement)
+        string = string.replace(placeholder, _force_unicode(replacement))
 
     # do the {{match-XX}} and {{match-field-XX}} replacements
     field_replacements = {}
@@ -153,7 +160,7 @@ def replace_placeholders(string, data, matches):
             field_replacements[placeholder.group(0)] = replacement
 
     for placeholder, replacement in field_replacements.iteritems():
-        string = string.replace(placeholder, replacement)
+        string = string.replace(placeholder, _force_unicode(replacement))
 
     return string
 
@@ -228,16 +235,21 @@ class Ruleset(object):
             type = values.get("type", "any")
             if type == "any":
                 # try to create two Rules for comments and links
+                rule = None
                 for type_value in ("comment", "submission"):
                     values["type"] = type_value
                     try:
                         rule = Rule(values)
-                    except AutoModeratorRuleTypeError:
+                    except AutoModeratorRuleTypeError as type_error:
                         continue
 
                     # only keep the rule if it had any checks
                     if rule.has_any_checks(targets_only=True):
                         self.rules.append(Rule(values))
+
+                # if both types hit exceptions we should actually error
+                if not rule:
+                    raise type_error
             else:
                 self.rules.append(Rule(values))
 
@@ -315,7 +327,8 @@ class RuleComponent(object):
     """Data related to individual key/value components making up a rule."""
 
     def __init__(self, valid_types=None, valid_values=None,
-            valid_regex=None, valid_targets=None, default=None, component_type=None):
+            valid_regex=None, valid_targets=None, default=None,
+            component_type=None, aliases=None):
         """
         Keyword arguments:
         valid_types -- valid value types for this key
@@ -324,6 +337,7 @@ class RuleComponent(object):
         valid_targets -- this key can only be defined for these target types
         default -- if this key isn't defined, default to this value
         component_type -- "action" or "check" if relevant for this key
+        aliases -- other keys you can use (only if "normal" one isn't used)
         """
         self.valid_types = valid_types
         self.valid_values = valid_values
@@ -334,6 +348,7 @@ class RuleComponent(object):
         self.valid_targets = tup(valid_targets)
         self.default = default
         self.component_type = component_type
+        self.aliases = aliases or []
 
     def validate(self, value):
         """Return whether a value satisfies this key's constraints."""
@@ -432,13 +447,14 @@ class RuleTarget(object):
             valid_targets=(Link, Comment),
         ),
         "action": RuleComponent(
-            valid_values={"approve", "remove", "spam", "report"},
+            valid_values={"approve", "remove", "spam", "filter", "report"},
             valid_targets=(Link, Comment),
             component_type="action",
         ),
-        "report_reason": RuleComponent(
+        "action_reason": RuleComponent(
             valid_types=basestring,
             valid_targets=(Link, Comment),
+            aliases=["report_reason"],
         ),
         "set_flair": RuleComponent(
             valid_types=(basestring, list),
@@ -472,6 +488,11 @@ class RuleTarget(object):
         ),
         "set_contest_mode": RuleComponent(
             valid_types=bool,
+            valid_targets=Link,
+            component_type="action",
+        ),
+        "set_suggested_sort": RuleComponent(
+            valid_values=CommentSortMenu.suggested_sort_options + ("best",),
             valid_targets=Link,
             component_type="action",
         ),
@@ -536,16 +557,14 @@ class RuleTarget(object):
 
         if not values:
             values = {}
+        else:
+            values = values.copy()
+
+        self.set_values(values)
 
         # determine patterns that will be matched against fields
         self.match_patterns = self.get_match_patterns(values)
         self.matches = {}
-        
-        # remove any match pattern keys from the values dict
-        for key in self.match_patterns:
-            del values[key]
-
-        self.set_values(values)
 
         self.approve_banned = approve_banned
 
@@ -560,8 +579,16 @@ class RuleTarget(object):
 
         for key, component in self._potential_components.iteritems():
             if self.target_type in component.valid_targets:
-                if key in values:
-                    value = values.pop(key)
+                # pop the key and all aliases out of the values
+                # but only keep the first value we find
+                value = None
+                sources = [key] + component.aliases
+                for source in sources:
+                    from_source = values.pop(source, None)
+                    if value is None:
+                        value = from_source
+
+                if value is not None:
                     if not component.validate(value):
                         raise AutoModeratorSyntaxError(
                             "invalid value for `%s`: `%s`" % (key, value),
@@ -577,16 +604,31 @@ class RuleTarget(object):
                 else:
                     setattr(self, key, component.default)
             else:
+                if key in values:
+                    raise AutoModeratorRuleTypeError(
+                        "Can't use `%s` on this type" % key,
+                        self.parent.yaml,
+                    )
+
                 setattr(self, key, None)
 
         # special handling for set_flair
-        if self.set_flair:
+        if self.set_flair is not None:
             if isinstance(self.set_flair, basestring):
                 self.set_flair = [self.set_flair, ""]
+
+            # handle 0 or 1 item lists
+            while len(self.set_flair) < 2:
+                self.set_flair.append("")
+
             self.set_flair = {
                 "text": self.set_flair[0],
                 "class": self.set_flair[1],
             }
+
+        # ugly hack to allow people to use "best" instead of "confidence"
+        if self.set_suggested_sort == "best":
+            self.set_suggested_sort = "confidence"
 
     _match_field_key_regex = re.compile(r"^(~?[^\s(]+)\s*(?:\((.+)\))?$")
     def parse_match_fields_key(self, key):
@@ -613,6 +655,12 @@ class RuleTarget(object):
         valid_fields = self._match_fields_by_type[self.target_type]
         fields = {field for field in fields if field in valid_fields}
 
+        if not fields:
+            raise AutoModeratorRuleTypeError(
+                "Can't search `%s` on this type" % key,
+                self.parent.yaml,
+            )
+
         modifiers = matches.group(2)
         if modifiers:
             modifiers = [mod.strip() for mod in modifiers.split(",")]
@@ -638,9 +686,6 @@ class RuleTarget(object):
         match_patterns = {}
         
         for key in values:
-            if key in self._potential_components:
-                continue
-
             parsed_key = self.parse_match_fields_key(key)
 
             # add fields to the list of fields we're going to check
@@ -694,11 +739,13 @@ class RuleTarget(object):
     @property
     def needs_media_data(self):
         """Whether the component requires data from the media embed."""
-        if any(field.startswith("media_") for field in self.match_fields):
-            return True
+        for key in self.match_patterns:
+            fields = self.parse_match_fields_key(key)["fields"]
+            if all(field.startswith("media_") for field in fields):
+                return True
 
         # check if any of the fields that support placeholders have media ones
-        potential_placeholders = [self.report_reason]
+        potential_placeholders = [self.action_reason]
         if self.set_flair:
             potential_placeholders.extend(self.set_flair.values())
         if any(text and "{{media_" in text for text in potential_placeholders):
@@ -781,22 +828,28 @@ class RuleTarget(object):
 
     def check_account_thresholds(self, account, data):
         """Check karma/age thresholds against an account."""
-        # don't check banned accounts
+        thresholds = ["comment_karma", "link_karma", "combined_karma",
+            "account_age"]
+        # figure out which thresholds/values we need to check against
+        checks = {}
+        for threshold in thresholds:
+            compare_value = getattr(self, threshold, None)
+            if compare_value is not None:
+                checks[threshold] = compare_value
+
+        # if we don't need to actually check anything, just return True
+        if not checks:
+            return True
+
+        # banned accounts should never satisfy threshold checks
         if account._spam:
             return False
 
-        checks = ["comment_karma", "link_karma", "combined_karma",
-            "account_age"]
-
-        for check in checks:
-            compare = getattr(self, check, None)
-            if not compare:
-                continue
-
-            match = re.match(self._operator_regex, compare)
+        for check, compare_value in checks.iteritems():
+            match = re.match(self._operator_regex, compare_value)
             if match:
                 operator = match.group(1)
-                compare = compare[len(operator):].strip()
+                compare_value = compare_value[len(operator):].strip()
             if not match or operator == "==":
                 operator = "="
 
@@ -804,23 +857,23 @@ class RuleTarget(object):
             if check == "account_age":
                 # if it's just a number, default to days
                 try:
-                    compare = int(compare)
-                    compare = "%s days" % compare
+                    compare_value = int(compare_value)
+                    compare_value = "%s days" % compare_value
                 except ValueError:
                     pass
 
-                compare = timeinterval_fromstr(compare)
+                compare_value = timeinterval_fromstr(compare_value)
             else:
-                compare = int(compare)
+                compare_value = int(compare_value)
 
             value = self.get_field_value_from_item(account, data, check)
 
             if operator == "<":
-                result = value < compare
+                result = value < compare_value
             elif operator == ">":
-                result = value > compare
+                result = value > compare_value
             elif operator == "=":
-                result = value == compare
+                result = value == compare_value
 
             # if satisfy_any_threshold is True, we can return True as soon
             # as a single check is successful. If it's False, they all need
@@ -839,9 +892,10 @@ class RuleTarget(object):
         if len(self.match_patterns) == 0:
             return True
 
-        match = None
+        self.matches = {}
         checked_anything = False
         for key, match_pattern in self.match_patterns.iteritems():
+            match = None
             parsed_key = self.parse_match_fields_key(key)
 
             if isinstance(item, Link) and not item.is_self:
@@ -873,12 +927,17 @@ class RuleTarget(object):
 
     def perform_actions(self, item, data):
         """Execute the defined actions on the item."""
-        # only approve if it's currently removed or reported
-        should_approve = item._spam or (self.reports and item.reported)
+        # only approve if it's currently removed or reported, and hasn't
+        # been removed by a moderator
+        ban_info = getattr(item, "ban_info", {})
+        mod_banned = ban_info.get("moderator_banned")
+        should_approve = ((item._spam and not mod_banned) or 
+            (self.reports and item.reported))
         if self.action == "approve" and should_approve:
             approvable_author = not data["author"]._spam or self.approve_banned
             if approvable_author:
                 # TODO: shouldn't need to set train_spam/insert values
+                was_removed = item._spam
                 admintools.unspam(item, moderator_unbanned=True,
                     unbanner=ACCOUNT.name, train_spam=True, insert=item._spam)
 
@@ -889,15 +948,26 @@ class RuleTarget(object):
                     log_action = "approvecomment"
 
                 if log_action:
+                    if self.action_reason:
+                        reason = replace_placeholders(
+                            self.action_reason, data, self.parent.matches)
+                    else:
+                        reason = "unspam" if was_removed else "approved"
                     ModAction.create(data["subreddit"], ACCOUNT, log_action,
-                        target=item, details="unspam")
+                        target=item, details=reason)
 
                 g.stats.simple_event("automoderator.approve")
 
-        if self.action in {"remove", "spam"}:
+        if self.action in {"remove", "spam", "filter"}:
             spam = (self.action == "spam")
-            admintools.spam(item, auto=False, moderator_banned=True,
-                banner=ACCOUNT.name, train_spam=spam)
+            keep_in_modqueue = (self.action == "filter")
+            admintools.spam(
+                item,
+                auto=keep_in_modqueue,
+                moderator_banned=True,
+                banner=ACCOUNT.name,
+                train_spam=spam,
+            )
 
             # TODO: shouldn't need to do all of this here
             modified_thing = None
@@ -915,16 +985,20 @@ class RuleTarget(object):
                 LastModified.touch(modified_thing._fullname, "Comments")
 
             if log_action:
-                log_details = "spam" if spam else "remove"
+                if self.action_reason:
+                    reason = replace_placeholders(
+                        self.action_reason, data, self.parent.matches)
+                else:
+                    reason = "spam" if spam else "remove"
                 ModAction.create(data["subreddit"], ACCOUNT, log_action,
-                    target=item, details=log_details)
+                    target=item, details=reason)
 
             g.stats.simple_event("automoderator.%s" % self.action)
 
         if self.action == "report":
-            if self.report_reason:
+            if self.action_reason:
                 reason = replace_placeholders(
-                    self.report_reason, data, self.parent.matches)
+                    self.action_reason, data, self.parent.matches)
             else:
                 reason = None
             Report.new(ACCOUNT, item, reason)
@@ -965,6 +1039,15 @@ class RuleTarget(object):
                     log_action = "unsticky"
                 ModAction.create(
                     data["subreddit"], ACCOUNT, log_action, target=item)
+
+        if self.set_suggested_sort is not None:
+            if not item.suggested_sort:
+                item.suggested_sort = self.set_suggested_sort
+                item._commit()
+
+                # TODO: shouldn't need to do this here
+                ModAction.create(data["subreddit"], ACCOUNT,
+                    action="setsuggestedsort", target=item)
 
         if self.set_flair:
             # don't overwrite existing flair unless that was specified
@@ -1043,9 +1126,10 @@ class RuleTarget(object):
             comment = self.get_field_value_from_item(item, data, "comment_karma")
             value = link + comment
         elif field == "flair_text" and isinstance(item, Account):
-            value = item.flair_text(data["subreddit"]._id)
+            value = item.flair_text(data["subreddit"]._id, obey_disabled=True)
         elif field == "flair_css_class" and isinstance(item, Account):
-            value = item.flair_css_class(data["subreddit"]._id)
+            value = item.flair_css_class(
+                data["subreddit"]._id, obey_disabled=True)
         else:
             value = getattr(item, field, "")
 
@@ -1127,8 +1211,11 @@ class Rule(object):
         if isinstance(not_author, (list, basestring)):
             author["~name"] = not_author
 
+        approve_banned = False
         if author:
             self.targets["author"] = RuleTarget(Account, author, self)
+            # only approve banned users' posts if an author name check is done
+            approve_banned = ("name" in self.targets["author"].match_fields)
 
         parent_submission = values.pop("parent_submission", None)
         if parent_submission:
@@ -1148,14 +1235,13 @@ class Rule(object):
             self.base_target_type,
             values,
             self,
-            # only approve banned users' posts if an author name check is done
-            approve_banned=("name" in author),
+            approve_banned=approve_banned,
         )
 
     @property
     def is_removal_rule(self):
         """Whether the rule could result in removing the item."""
-        return self.targets["base"].action in {"spam", "remove"}
+        return self.targets["base"].action in {"spam", "remove", "filter"}
 
     @property
     def is_inapplicable_to_mods(self):
@@ -1306,6 +1392,7 @@ class Rule(object):
             new_comment, inbox_rel = Comment._new(
                 ACCOUNT, link, parent_comment, comment, None)
             new_comment.distinguished = "yes"
+            new_comment.sendreplies = False
             new_comment._commit()
             queries.queue_vote(ACCOUNT, new_comment, True, None)
             queries.new_comment(new_comment, inbox_rel)
@@ -1362,45 +1449,50 @@ def run():
             return
 
         fullname = msg.body
-        item = Thing._by_fullname(fullname, data=True)
-        if not isinstance(item, (Link, Comment)):
-            return
+        with g.make_lock("automoderator", "automod_" + fullname, timeout=5):
+            item = Thing._by_fullname(fullname, data=True)
+            if not isinstance(item, (Link, Comment)):
+                return
 
-        subreddit = item.subreddit_slow
-        
-        wiki_page_id = wiki_id(subreddit._id36, "config/automoderator")
-        wiki_page_fullname = "WikiPage_%s" % wiki_page_id
-        last_edited = LastModified.get(wiki_page_fullname, "Edit")
-        if not last_edited:
-            return
+            subreddit = item.subreddit_slow
+            
+            wiki_page_id = wiki_id(subreddit._id36, "config/automoderator")
+            wiki_page_fullname = "WikiPage_%s" % wiki_page_id
+            last_edited = LastModified.get(wiki_page_fullname, "Edit")
+            if not last_edited:
+                return
 
-        # initialize rules for the subreddit if we haven't already
-        # or if the page has been edited since we last initialized
-        need_to_init = False
-        if subreddit._id not in rules_by_subreddit:
-            need_to_init = True
-        else:
-            rules = rules_by_subreddit[subreddit._id]
-            if last_edited > rules.init_time:
+            # initialize rules for the subreddit if we haven't already
+            # or if the page has been edited since we last initialized
+            need_to_init = False
+            if subreddit._id not in rules_by_subreddit:
                 need_to_init = True
+            else:
+                rules = rules_by_subreddit[subreddit._id]
+                if last_edited > rules.init_time:
+                    need_to_init = True
 
-        if need_to_init:
-            wp = WikiPage.get(subreddit, "config/automoderator")
-            rules = Ruleset(wp.content)
-            rules_by_subreddit[subreddit._id] = rules
+            if need_to_init:
+                wp = WikiPage.get(subreddit, "config/automoderator")
+                try:
+                    rules = Ruleset(wp.content)
+                except (AutoModeratorSyntaxError, AutoModeratorRuleTypeError):
+                    print "ERROR: Invalid config in /r/%s" % subreddit.name
+                    return
+                rules_by_subreddit[subreddit._id] = rules
 
-        if not rules:
-            return
+            if not rules:
+                return
 
-        try:
-            TimeoutFunction(rules.apply_to_item, 2)(item)
-            print "Checked %s from /r/%s" % (item, subreddit.name)
-        except TimeoutFunctionException:
-            print "Timed out on %s from /r/%s" % (item, subreddit.name)
-        except KeyboardInterrupt:
-            raise
-        except:
-            print "Error on %s from /r/%s" % (item, subreddit.name)
-            print traceback.format_exc()
+            try:
+                TimeoutFunction(rules.apply_to_item, 2)(item)
+                print "Checked %s from /r/%s" % (item, subreddit.name)
+            except TimeoutFunctionException:
+                print "Timed out on %s from /r/%s" % (item, subreddit.name)
+            except KeyboardInterrupt:
+                raise
+            except:
+                print "Error on %s from /r/%s" % (item, subreddit.name)
+                print traceback.format_exc()
 
     amqp.consume_items('automoderator_q', process_message, verbose=False)

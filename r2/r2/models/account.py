@@ -64,6 +64,8 @@ class Account(Thing):
                                                'inbox_count',
                                                'num_payment_methods',
                                                'num_failed_payments',
+                                               'num_gildings',
+                                               'admin_takedown_strikes',
                                               )
     _int_prop_suffix = '_karma'
     _essentials = ('name', )
@@ -82,7 +84,7 @@ class Account(Thing):
                      pref_min_comment_score = -4,
                      pref_num_comments = g.num_comments,
                      pref_highlight_controversial=False,
-                     pref_default_comment_sort = None,
+                     pref_default_comment_sort = 'confidence',
                      pref_lang = g.lang,
                      pref_content_langs = (g.lang,),
                      pref_over_18 = False,
@@ -109,6 +111,7 @@ class Account(Thing):
                      pref_collapse_left_bar=False,
                      pref_public_server_seconds=False,
                      pref_ignore_suggested_sort=False,
+                     pref_beta=False,
                      mobile_compress = False,
                      mobile_thumbnail = True,
                      reported = 0,
@@ -127,6 +130,7 @@ class Account(Thing):
                      gold = False,
                      gold_charter = False,
                      gold_creddits = 0,
+                     num_gildings=0,
                      cake_expiration=None,
                      otp_secret=None,
                      state=0,
@@ -143,6 +147,7 @@ class Account(Thing):
                      gild_reveal_username=False,
                      selfserve_cpm_override_pennies=None,
                      pref_show_gold_expiration=False,
+                     admin_takedown_strikes=0,
                      )
     _preference_attrs = tuple(k for k in _defaults.keys()
                               if k.startswith("pref_"))
@@ -160,17 +165,12 @@ class Account(Thing):
         return not self.__eq__(other)
 
     def has_interacted_with(self, sr):
-        if not sr:
+        try:
+            r = SubredditParticipationByAccount.fast_query(self, [sr])
+        except tdb_cassandra.NotFound:
             return False
 
-        for type in ('link', 'comment'):
-            if hasattr(self, "%s_%s_karma" % (sr.name, type)):
-                return True
-
-        if sr.is_subscriber(self):
-            return True
-
-        return False
+        return (self, sr) in r
 
     def karma(self, kind, sr = None):
         suffix = '_' + kind + '_karma'
@@ -674,10 +674,14 @@ class Account(Thing):
     def flair_enabled_in_sr(self, sr_id):
         return getattr(self, 'flair_%s_enabled' % sr_id, True)
 
-    def flair_text(self, sr_id):
+    def flair_text(self, sr_id, obey_disabled=False):
+        if obey_disabled and not self.flair_enabled_in_sr(sr_id):
+            return None
         return getattr(self, 'flair_%s_text' % sr_id, None)
 
-    def flair_css_class(self, sr_id):
+    def flair_css_class(self, sr_id, obey_disabled=False):
+        if obey_disabled and not self.flair_enabled_in_sr(sr_id):
+            return None
         return getattr(self, 'flair_%s_css_class' % sr_id, None)
 
     def can_flair_in_sr(self, user, sr):
@@ -768,16 +772,8 @@ class Account(Thing):
         return (self.has_gold_subscription or
                 (self.pref_creddit_autorenew and self.gold_creddits > 0))
 
-    @property
-    def default_comment_sort(self):
-        if self.pref_default_comment_sort:
-            return self.pref_default_comment_sort
-
-        old_sort_pref = self.sort_options.get('front_sort')
-        if old_sort_pref:
-            return old_sort_pref
-
-        return 'confidence'
+    def incr_admin_takedown_strikes(self, amt=1):
+        return self._incr('admin_takedown_strikes', amt)
 
 
 class FakeAccount(Account):
@@ -1066,3 +1062,21 @@ class AccountsByCanonicalEmail(tdb_cassandra.View):
             return []
         account_id36s = cls.get_time_sorted_columns(canonical).keys()
         return Account._byID36(account_id36s, data=True, return_dict=False)
+    
+
+class SubredditParticipationByAccount(tdb_cassandra.DenormalizedRelation):
+    _use_db = True
+    _write_last_modified = False
+    _views = []
+    _extra_schema_creation_args = {
+        "key_validation_class": tdb_cassandra.ASCII_TYPE,
+        "default_validation_class": tdb_cassandra.DATE_TYPE,
+    }
+
+    @classmethod
+    def value_for(cls, thing1, thing2):
+        return datetime.now(g.tz)
+
+    @classmethod
+    def mark_participated(cls, account, subreddit):
+        cls.create(account, [subreddit])

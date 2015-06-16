@@ -21,6 +21,7 @@
 ###############################################################################
 
 import json
+import hashlib
 
 from pylons import g
 
@@ -96,7 +97,17 @@ class FeatureState(object):
         if cfg.get('employee') and world.is_employee(user):
             return True
 
+        if cfg.get('beta') and world.user_has_beta_enabled(user):
+            return True
+
         if cfg.get('gold') and world.has_gold(user):
+            return True
+
+        loggedin = world.is_user_loggedin()
+        if cfg.get('loggedin') and loggedin:
+            return True
+
+        if cfg.get('loggedout') and not loggedin:
             return True
 
         users = [u.lower() for u in cfg.get('users', [])]
@@ -114,6 +125,16 @@ class FeatureState(object):
         clients = set(cfg.get('oauth_clients', []))
         if clients and oauth_client and oauth_client in clients:
             return True
+
+        percent_loggedin = cfg.get('percent_loggedin', 0)
+        if percent_loggedin and user:
+            # Mix the feature name in with the user id so the same users
+            # don't get selected for ramp-ups for every feature
+            hashed = hashlib.sha1(self.name + user._fullname)
+            int_digest = long(hashed.hexdigest(), 16)
+
+            if int_digest % 100 < percent_loggedin:
+                return True
 
         # Unknown value, default to off.
         return False

@@ -24,6 +24,7 @@ import base64
 import codecs
 import ConfigParser
 import cPickle as pickle
+import functools
 import itertools
 import math
 import os
@@ -40,6 +41,7 @@ from urllib import unquote_plus
 from urllib2 import urlopen, Request
 from urlparse import urlparse, urlunparse
 
+import pytz
 import snudown
 import unidecode
 
@@ -338,7 +340,13 @@ def sanitize_url(url, require_scheme=False, valid_schemes=VALID_SCHEMES):
         u = urlparse(url)
         # first pass: make sure a scheme has been specified
         if not require_scheme and not u.scheme:
-            url = 'http://' + url
+            # "//example.com/"
+            if u.hostname:
+                prepend = "https:" if c.secure else "http:"
+            # "example.com/"
+            else:
+                prepend = "http://"
+            url = prepend + url
             u = urlparse(url)
     except ValueError:
         return None
@@ -514,7 +522,7 @@ class UrlParser(object):
         # Since in HTTP everything's a string, coercing values to strings now
         # makes equality testing easier.  Python will throw an error if you try
         # to pass in a non-string key, so that's already taken care of for us.
-        updates = {k: str(v) for k, v in updates.iteritems()}
+        updates = {k: _force_unicode(v) for k, v in updates.iteritems()}
         self.query_dict.update(updates)
 
     @property
@@ -548,6 +556,11 @@ class UrlParser(object):
             return ''
 
         return filename_parts[-1]
+
+    def has_image_extension(self):
+        """Guess if the url leads to an image."""
+        extension = self.path_extension().lower()
+        return extension in {'gif', 'jpeg', 'jpg', 'png', 'tiff'}
 
     def set_extension(self, extension):
         """
@@ -707,7 +720,8 @@ class UrlParser(object):
             # should be safe enough to allow after three slashes. Opera 12's the
             # only browser that trips over them, and it doesn't fall for
             # `http:///foo.com/`.
-            if match.group(0) == '\xa0':
+            # Check both in case unicode promotion fails
+            if match.group(0) in {u'\xa0', '\xa0'}:
                 if match.string[0:match.start(0)].count('/') < 3:
                     return False
             else:
@@ -1532,16 +1546,21 @@ def extract_urls_from_markdown(md):
             yield url
 
 
-def extract_user_mentions(text, num=None):
+def extract_user_mentions(text):
+    """Return a set of all usernames (lowercased) mentioned in Markdown text.
+
+    This function works by processing the Markdown, and then looking through
+    all links in the resulting HTML. Any links that start with /u/ (as a
+    relative link) are considered to be a "mention", so this will mostly just
+    catch the links created by our auto-linking of /u/ and u/.
+
+    Note that the usernames are converted to lowercase and added to a set,
+    so only unique mentions will be returned.
+    """
     from r2.lib.validator import chkuser
-    if num is None:
-        num = g.butler_max_mentions
+    usernames = set()
 
-    cur_num = 0
     for url in extract_urls_from_markdown(text):
-        if num != -1 and cur_num >= num:
-            break
-
         if not url.startswith("/u/"):
             continue
 
@@ -1549,8 +1568,9 @@ def extract_user_mentions(text, num=None):
         if not chkuser(username):
             continue
 
-        cur_num += 1
-        yield username.lower()
+        usernames.add(username.lower())
+
+    return usernames
 
 
 def summarize_markdown(md):
@@ -1558,6 +1578,11 @@ def summarize_markdown(md):
 
     first_graf, sep, rest = md.partition("\n\n")
     return first_graf[:500]
+
+
+def blockquote_text(text):
+    """Wrap a chunk of Markdown text into a blockquote."""
+    return "\n".join("> " + line for line in text.splitlines())
 
 
 def find_containing_network(ip_ranges, address):
@@ -1757,3 +1782,60 @@ def lowercase_keys_recursively(subject):
         lowercased[key.lower()] = val
 
     return lowercased
+
+
+def sampled(live_config_var):
+    """Wrap a function that should only actually run occasionally
+
+    The wrapped function will only actually execute at the rate
+    specified by the live_config sample rate given.
+
+    Example:
+
+    @sampled("foobar_sample_rate")
+    def foobar():
+        ...
+
+    If g.live_config["foobar_sample_rate"] is set to 0.5, foobar()
+    will only execute 50% of the time when it is called.
+
+    """
+    def sampled_decorator(fn):
+        @functools.wraps(fn)
+        def sampled_fn(*a, **kw):
+            if random.random() > g.live_config[live_config_var]:
+                return None
+            else:
+                return fn(*a, **kw)
+        return sampled_fn
+    return sampled_decorator
+
+
+def squelch_exceptions(fn):
+    """Wrap a function to log and suppress all internal exceptions
+
+    When running in debug mode, the exception will be propagated, but
+    in production environments, the function exception will be logged,
+    then suppressed.
+
+    Use of this decorator is not an excuse to not handle exceptions
+
+    """
+    @functools.wraps(fn)
+    def squelched_fn(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except BaseException:
+            if g.debug:
+                raise
+            else:
+                # log.exception will send a stack trace as well
+                g.log.exception("squelching exception")
+    return squelched_fn
+
+
+EPOCH = datetime(1970, 1, 1, tzinfo=pytz.UTC)
+
+def epoch_timestamp(dt):
+    """Returns the number of seconds from the epoch to date."""
+    return (dt - EPOCH).total_seconds()

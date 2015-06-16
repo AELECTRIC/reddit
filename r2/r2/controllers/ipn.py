@@ -35,6 +35,7 @@ from r2.lib.csrf import csrf_exempt
 from r2.lib.emailer import _system_email
 from r2.lib.errors import MessageError
 from r2.lib.filters import _force_unicode, _force_utf8
+from r2.lib.hooks import get_hook
 from r2.lib.log import log_text
 from r2.lib.pages import GoldGiftCodeEmail
 from r2.lib.strings import strings
@@ -260,16 +261,21 @@ def send_gift(buyer, recipient, months, days, signed, giftmessage,
               thing_fullname, note=None):
     admintools.adjust_gold_expiration(recipient, days=days)
 
+    # increment num_gildings for all types of gildings not to themselves
+    if buyer != recipient:
+        buyer._incr("num_gildings")
+
     if thing_fullname:
         thing = Thing._by_fullname(thing_fullname, data=True)
         thing._gild(buyer)
     else:
         thing = None
+        get_hook('user.gild').call(recipient=recipient, gilder=buyer)
 
     if signed:
         sender = buyer.name
         md_sender = "[%s](/user/%s)" % (sender, sender)
-        repliable = False
+        repliable = True
     else:
         sender = _("An anonymous redditor")
         md_sender = _("An anonymous redditor")
@@ -317,7 +323,8 @@ def send_gift(buyer, recipient, months, days, signed, giftmessage,
 
     try:
         send_system_message(recipient, subject, message, author=buyer,
-                            distinguished='gold-auto', repliable=repliable)
+                            distinguished='gold-auto', repliable=repliable,
+                            signed=signed)
     except MessageError:
         g.log.error('send_gift: could not send system message')
 
@@ -917,6 +924,7 @@ class StripeController(GoldPaymentController):
         'customer.card.created': 'noop',
         'customer.card.updated': 'noop',
         'customer.card.deleted': 'noop',
+        'customer.source.updated': 'noop',
         'transfer.created': 'noop',
         'transfer.paid': 'noop',
         'balance.available': 'noop',

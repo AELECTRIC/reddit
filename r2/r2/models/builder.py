@@ -45,7 +45,7 @@ from r2.lib.comment_tree import (
 from r2.lib.wrapped import Wrapped
 from r2.lib.db import operators, tdb_cassandra
 from r2.lib.filters import _force_unicode
-from r2.lib.utils import Storage, timesince, tup
+from r2.lib.utils import Storage, timesince, tup, to36
 from r2.lib.utils.comment_tree_utils import get_num_children
 
 from r2.models import (
@@ -147,14 +147,20 @@ class Builder(object):
 
             try:
                 w.author = authors.get(item.author_id)
-                if user and item.author_id in user.friends:
+                author_id = item.author_id
+
+                # if display_author exists, then author_id is unknown to the
+                # receiver, so don't display friend relationship details
+                if hasattr(item, 'display_author') and item.display_author:
+                    author_id = item.display_author
+                if user and author_id in user.friends:
                     # deprecated old way:
                     w.friend = True
 
                     # new way:
                     label = None
                     if friend_rels:
-                        rel = friend_rels[item.author_id]
+                        rel = friend_rels[author_id]
                         note = getattr(rel, "note", None)
                         if note:
                             label = u"%s (%s)" % (_("friend"), 
@@ -466,7 +472,6 @@ class QueryBuilder(Builder):
             for item in items:
                 item.sr_detail = True
 
-
         # Make sure first_item and last_item refer to things in items
         # NOTE: could retrieve incorrect item if there were items with
         # duplicate _id
@@ -687,6 +692,7 @@ class SearchBuilder(IDBuilder):
                  skip_deleted_authors=True, **kw):
         IDBuilder.__init__(self, query, wrap, keep_fn, skip, **kw)
         self.skip_deleted_authors = skip_deleted_authors
+        self.sr_detail = kw.get('sr_detail')
 
     def init_query(self):
         self.skip = True
@@ -950,6 +956,15 @@ class CommentBuilder(Builder):
         wrapped = self.wrap_items(comments)
         timer.intermediate("wrap_comments")
         wrapped_by_id = {comment._id: comment for comment in wrapped}
+
+        if self.children:
+            # rewrite the parent links to use anchor tags
+            for comment_id in self.children:
+                if comment_id in wrapped_by_id:
+                    item = wrapped_by_id[comment_id]
+                    if item.parent_id:
+                        item.parent_permalink = '#' + to36(item.parent_id)
+
         final = []
 
         # We have some special collapsing rules for the Q&A sort type.
@@ -974,28 +989,37 @@ class CommentBuilder(Builder):
             comment.num_children = num_children[comment._id]
             comment.edits_visible = self.edits_visible
 
+            parent = wrapped_by_id.get(comment.parent_id)
+            if qa_sort_hiding:
+                author_is_special = comment.author_id in special_responder_ids
+            else:
+                author_is_special = False
+
             # In the Q&A sort type, we want to collapse all comments other than
             # those that are:
             #
             # 1. Top-level comments,
             # 2. Responses from the OP(s),
-            # 3. Responded to by the OP(s) (dealt with below), or
-            # 4. Otherwise normally prevented from collapse (eg distinguished
+            # 3. Responded to by the OP(s) (dealt with below),
+            # 4. Within one level of an OP reply, or
+            # 5. Otherwise normally prevented from collapse (eg distinguished
             #    comments).
             if (qa_sort_hiding and
-                   depth[comment._id] != 0 and # (1)
-                   comment.author_id not in special_responder_ids and # (2)
-                   not comment.prevent_collapse): # (4)
+                    depth[comment._id] != 0 and  # (1)
+                    not author_is_special and  # (2)
+                    not (parent and
+                         parent.author_id in special_responder_ids and
+                         feature.is_enabled('qa_show_replies')) and  # (4)
+                    not comment.prevent_collapse):  # (5)
                 comment.hidden = True
 
-            if comment.collapsed and comment._id in dont_collapse:
-                comment.collapsed = False
-                comment.hidden = False
+            if comment.collapsed:
+                if comment._id in dont_collapse or author_is_special:
+                    comment.collapsed = False
+                    comment.hidden = False
 
-            parent = wrapped_by_id.get(comment.parent_id)
             if parent:
-                if (qa_sort_hiding and
-                        comment.author_id in special_responder_ids):
+                if author_is_special:
                     # Un-collapse parents as necessary.  It's a lot easier to
                     # do this here, upwards, than to check through all the
                     # children when we were iterating at the parent.

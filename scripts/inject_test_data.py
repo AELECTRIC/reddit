@@ -35,7 +35,7 @@ from pylons import g
 
 from r2.lib.db import queries
 from r2.lib import amqp
-from r2.lib.utils import weighted_lottery
+from r2.lib.utils import weighted_lottery, get_requests_resp_json
 from r2.models import Account, NotFound, register, Subreddit, Link, Comment
 
 
@@ -121,7 +121,7 @@ def fetch_listing(path, limit=1000, batch_size=100):
         response = session.get(base_url, params=params)
         response.raise_for_status()
 
-        listing = response.json["data"]
+        listing = get_requests_resp_json(response)["data"]
         for child in listing["children"]:
             yield child["data"]
             count += 1
@@ -253,6 +253,7 @@ def inject_test_data(num_links=25, num_comments=25, num_votes=5):
     ensure_account(g.automoderator_account)
     ensure_subreddit(g.default_sr, system_user)
     ensure_subreddit(g.takedown_sr, system_user)
+    ensure_subreddit(g.beta_sr, system_user)
 
     print
     print

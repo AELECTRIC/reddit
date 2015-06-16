@@ -137,6 +137,9 @@ def js_config(extra_config=None):
     action_name = request.environ['pylons.routes_dict']['action']
     mac = hmac.new(g.secrets["action_name"], controller_name + '.' + action_name, hashlib.sha1)
     verification = mac.hexdigest()
+    cur_subreddit = ""
+    if isinstance(c.site, Subreddit) and not c.default_sr:
+        cur_subreddit = c.site.name
 
     config = {
         # is the user logged in?
@@ -144,7 +147,7 @@ def js_config(extra_config=None):
         # logged in user's id
         "user_id": user_id,
         # the subreddit's name (for posts)
-        "post_site": c.site.name if not c.default_sr else "",
+        "post_site": cur_subreddit,
         # the user's voting hash
         "modhash": c.modhash or False,
         # the current rendering style
@@ -182,6 +185,7 @@ def js_config(extra_config=None):
         "static_root": static(''),
         "over_18": bool(c.over18),
         "new_window": bool(c.user.pref_newwindow),
+        "mweb_blacklist_expressions": g.live_config['mweb_blacklist_expressions'],
         "vote_hash": c.vote_hash,
         "gold": gold,
         "has_subscribed": logged and c.user.has_subscribed,
@@ -190,6 +194,7 @@ def js_config(extra_config=None):
           "verification": verification,
           "actionName": controller_name + '.' + action_name,
         },
+        "facebook_app_id": g.live_config["facebook_app_id"],
     }
 
     if g.uncompressedJS:
@@ -553,10 +558,12 @@ def add_attr(attrs, kind, label=None, link=None, cssclass=None, symbol=None):
     attrs.append( (priority, symbol, cssclass, label, link) )
 
 
-def search_url(query, subreddit, restrict_sr="off", sort=None, recent=None):
+def search_url(query, subreddit, restrict_sr="off", sort=None, recent=None, ref=None):
     import urllib
     query = _force_utf8(query)
     url_query = {"q": query}
+    if ref:
+        url_query["ref"] = ref
     if restrict_sr:
         url_query["restrict_sr"] = restrict_sr
     if sort:
@@ -650,3 +657,16 @@ def _wsf(format_trans, *args, **kwargs):
       _wsf("Are you %s? %s", name, unsafe(checkbox_html))
     """
     return format_html(_ws(format_trans), *args, **kwargs)
+
+
+def get_linkflair_css_classes(thing, prefix="linkflair-", on_class="has-linkflair", off_class="no-linkflair"):
+    has_linkflair =  thing.flair_text or thing.flair_css_class
+    show_linkflair = c.user.pref_show_link_flair
+    if has_linkflair and show_linkflair:
+        if thing.flair_css_class:
+            flair_css_classes = thing.flair_css_class.split()
+            prefixed_css_classes = ["%s%s" % (prefix, css_class) for css_class in flair_css_classes]
+            on_class = "%s %s" % (on_class, ' '.join(prefixed_css_classes))
+        return on_class
+    else:
+        return off_class

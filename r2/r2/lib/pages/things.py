@@ -20,6 +20,7 @@
 # Inc. All Rights Reserved.
 ###############################################################################
 
+from r2.config import feature
 from r2.lib.db.thing import NotFound
 from r2.lib.menus import (
   JsButton,
@@ -51,6 +52,8 @@ class PrintableButtons(Styled):
         show_approve = (thing.show_spam or show_ignore or
                         (is_link and approval_checkmark is None)) and not thing._deleted
 
+        show_new_post_sharing = feature.is_enabled('improved_sharing')
+
         Styled.__init__(self, style = style,
                         thing = thing,
                         fullname = thing._fullname,
@@ -68,6 +71,7 @@ class PrintableButtons(Styled):
                         show_flair = show_flair,
                         show_rescrape=show_rescrape,
                         show_givegold=show_givegold,
+                        show_new_post_sharing=show_new_post_sharing,
                         **kw)
         
 class BanButtons(PrintableButtons):
@@ -82,6 +86,11 @@ class LinkButtons(PrintableButtons):
                      c.user.name == thing.author.name)
         # do we show the report button?
         show_report = not is_author and report
+
+        # if they are the author, can they edit it?
+        thing_editable = getattr(thing, 'editable', True)
+        thing_takendown = getattr(thing, 'admin_takedown', False)
+        editable = is_author and thing_editable and not thing_takendown
 
         show_marknsfw = show_unmarknsfw = False
         show_rescrape = False
@@ -135,7 +144,7 @@ class LinkButtons(PrintableButtons):
                                   permalink  = thing.permalink,
                                   # button visibility
                                   saved = thing.saved,
-                                  editable = thing.editable, 
+                                  editable = editable, 
                                   hidden = thing.hidden, 
                                   ignore_reports = thing.ignore_reports,
                                   show_delete = show_delete,
@@ -158,6 +167,12 @@ class CommentButtons(PrintableButtons):
     def __init__(self, thing, delete = True, report = True):
         # is the current user the author?
         is_author = thing.is_author
+
+        # if they are the author, can they edit it?
+        thing_editable = getattr(thing, 'editable', True)
+        thing_takendown = getattr(thing, 'admin_takedown', False)
+        editable = is_author and thing_editable and not thing_takendown
+
         # do we show the report button?
         show_report = not is_author and report and thing.can_reply
         # do we show the delete button?
@@ -188,11 +203,11 @@ class CommentButtons(PrintableButtons):
             embed_button.build()
 
         PrintableButtons.__init__(self, "commentbuttons", thing,
-                                  can_save=thing.can_save,
                                   is_author = is_author, 
                                   profilepage = c.profilepage,
                                   permalink = thing.permalink,
                                   saved = thing.saved,
+                                  editable = editable,
                                   ignore_reports = thing.ignore_reports,
                                   full_comment_path = thing.full_comment_path,
                                   full_comment_count = thing.full_comment_count,

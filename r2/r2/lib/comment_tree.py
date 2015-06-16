@@ -39,9 +39,6 @@ def lock_key(link_id):
 def parent_comments_key(link_id):
     return 'comments_parents_' + str(link_id)
 
-def sort_comments_key(link_id, sort):
-    assert sort.startswith('_')
-    return '%s%s' % (to36(link_id), sort)
 
 def _get_sort_value(comment, sort, link=None, children=None):
     if sort == "_date":
@@ -88,8 +85,8 @@ def add_comments(comments):
         timer.stop()
         update_comment_votes(coms)
 
-def update_comment_votes(comments, write_consistency_level = None):
-    from r2.models import CommentSortsCache, CommentScoresByLink
+def update_comment_votes(comments):
+    from r2.models import CommentScoresByLink
 
     comments = tup(comments)
 
@@ -109,19 +106,11 @@ def update_comment_votes(comments, write_consistency_level = None):
             cid_tree = comment_trees[link_id].tree
             scores_by_comment = _comment_sorter_from_cids(
                 coms, sort, link, cid_tree, by_36=True)
-
-            # Cassandra always uses the id36 instead of the integer
-            # ID, so we'll map that first before sending it
-            c_key = sort_comments_key(link_id, sort)
-            CommentSortsCache._set_values(c_key, scores_by_comment,
-                write_consistency_level=write_consistency_level)
             CommentScoresByLink.set_scores(link, sort, scores_by_comment)
 
 
 def _comment_sorter_from_cids(comments, sort, link, cid_tree, by_36=False):
     """Retrieve sort values for comments.
-
-    Useful to fill in any gaps in CommentSortsCache.
 
     Arguments:
 
@@ -174,7 +163,7 @@ def _comment_sorter_from_cids(comments, sort, link, cid_tree, by_36=False):
 
     return comment_sorter
 
-def _get_comment_sorter(link_id, sort):
+def _get_comment_sorter(link, sort):
     """Retrieve cached sort values for all comments on a post.
 
     Arguments:
@@ -185,14 +174,9 @@ def _get_comment_sorter(link_id, sort):
 
     Returns a dictionary from cid to a numeric sort value.
     """
-    from r2.models import CommentSortsCache
-    from r2.lib.db.tdb_cassandra import NotFound
+    from r2.models import CommentScoresByLink
 
-    key = sort_comments_key(link_id, sort)
-    try:
-        sorter = CommentSortsCache._byID(key)._values()
-    except NotFound:
-        return {}
+    sorter = CommentScoresByLink.get_scores(link, sort)
 
     # we store these id36ed, but there are still bits of the code that
     # want to deal in integer IDs
@@ -220,7 +204,6 @@ def link_comments_and_sort(link, sort):
     * sorter -- a dictionary from cid to a numeric value to be used for
       sorting.
     """
-    from r2.models import CommentSortsCache
 
     # This has grown sort of organically over time. Right now the
     # cache of the comments tree consists in three keys:
@@ -233,13 +216,12 @@ def link_comments_and_sort(link, sort):
     # 2. The parent_comments_key =:= dict(comment_id -> parent_id)
     # 3. The comments_sorts keys =:= dict(comment_id36 -> float).
     #    These are represented by a Cassandra model
-    #    (CommentSortsCache) rather than a permacache key. One of
+    #    (CommentScoresByLink) rather than a permacache key. One of
     #    these exists for each sort (hot, new, etc)
 
     timer = g.stats.get_timer('comment_tree.get.%s' % link.comment_tree_version)
     timer.start()
 
-    link_id = link._id
     cache = get_comment_tree(link, timer=timer)
     cids = cache.cids
     tree = cache.tree
@@ -247,21 +229,20 @@ def link_comments_and_sort(link, sort):
     parents = cache.parents
 
     # load the sorter
-    sorter = _get_comment_sorter(link_id, sort)
+    sorter = _get_comment_sorter(link, sort)
 
     # find comments for which the sort values weren't in the cache
     sorter_needed = []
     if cids and not sorter:
         sorter_needed = cids
-        g.log.debug("comment_tree.py: sorter (%s) cache miss for Link %s"
-                    % (sort, link_id))
+        g.log.debug("comment_tree.py: sorter %s cache miss for %s", sort, link)
         sorter = {}
 
     sorter_needed = [x for x in cids if x not in sorter]
     if cids and sorter_needed:
         g.log.debug(
-            "Error in comment_tree: sorter %r inconsistent (missing %d e.g. %r)"
-            % (sort_comments_key(link_id, sort), len(sorter_needed), sorter_needed[:10]))
+            "Error in comment_tree: sorter %s/%s inconsistent (missing %d e.g. %r)"
+            % (link, sort, len(sorter_needed), sorter_needed[:10]))
         if not g.disallow_db_writes:
             update_comment_votes(Comment._byID(sorter_needed, data=True, return_dict=False))
 
@@ -273,12 +254,10 @@ def link_comments_and_sort(link, sort):
         timer.intermediate('sort')
 
     if parents is None:
-        g.log.debug("comment_tree.py: parents cache miss for Link %s"
-                    % link_id)
+        g.log.debug("comment_tree.py: parents cache miss for %s", link)
         parents = {}
     elif cids and not all(x in parents for x in cids):
-        g.log.debug("Error in comment_tree: parents inconsistent for Link %s"
-                    % link_id)
+        g.log.debug("Error in comment_tree: parents inconsistent for %s", link)
         parents = {}
 
     if not parents and len(cids) > 0:
@@ -527,7 +506,7 @@ def tree_sort_fn(tree):
     return threads[-1] if threads else root
 
 def _populate(after_id = None, estimate=54301242):
-    from r2.models import CommentSortsCache, desc
+    from r2.models import desc
     from r2.lib.db import tdb_cassandra
     from r2.lib import utils
 
@@ -547,4 +526,4 @@ def _populate(after_id = None, estimate=54301242):
 
     for chunk in utils.in_chunks(q, chunk_size):
         chunk = filter(lambda x: hasattr(x, 'link_id'), chunk)
-        update_comment_votes(chunk, write_consistency_level = tdb_cassandra.CL.ONE)
+        update_comment_votes(chunk)

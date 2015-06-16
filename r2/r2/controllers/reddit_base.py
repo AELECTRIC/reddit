@@ -55,7 +55,7 @@ from r2.lib.errors import (
     errors,
     reddit_http_error,
 )
-from r2.lib.filters import _force_utf8, _force_unicode
+from r2.lib.filters import _force_utf8, _force_unicode, scriptsafe_dumps
 from r2.lib.require import RequirementException, require, require_split
 from r2.lib.strings import strings
 from r2.lib.template_helpers import add_sr, JSPreload
@@ -487,7 +487,7 @@ def set_multireddit():
             # Only supported via API as we don't have a valid non-query
             # parameter equivalent for cross-user multis, which means
             # we can't generate proper links to /new, /top, etc in HTML
-            multi_ids = [m.lower() for m in request.GET.getall("m")]
+            multi_ids = [m.lower() for m in request.GET.getall("m") if m]
             multiurl = ""
 
         if multi_ids is not None:
@@ -678,7 +678,8 @@ def paginated_listing(default_page_size=25, max_page_size=100, backend='sql'):
                   before=VByName('before', backend=backend),
                   count=VCount('count'),
                   target=VTarget("target"),
-                  sr_detail=VBoolean("sr_detail"),
+                  sr_detail=VBoolean(
+                      "sr_detail", docs={"sr_detail": "(optional) expand subreddits"}),
                   show=VLength('show', 3, empty_error=None,
                                docs={"show": "(optional) the string `all`"}),
         )
@@ -865,7 +866,7 @@ def enforce_https():
             redirect_url = hsts_modify_redirect(dest)
 
     if redirect_url:
-        headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
+        headers = {"Cache-Control": "private, no-cache", "Pragma": "no-cache"}
         abort(307, location=redirect_url, headers=headers)
 
 
@@ -988,6 +989,7 @@ class MinimalController(BaseController):
                         c.extension,
                         c.render_style,
                         location,
+                        request.environ.get("WANT_RAW_JSON"),
                         cookies_key)
 
     def cached_response(self):
@@ -1017,7 +1019,7 @@ class MinimalController(BaseController):
         if c.oauth_user and g.RL_OAUTH_SITEWIDE_ENABLED:
             type_ = "oauth"
             period = g.RL_OAUTH_RESET_SECONDS
-            max_reqs = c.oauth_client._max_reqs
+            max_reqs = c.oauth2_client._max_reqs
             # Convert client_id to ascii str for use as memcache key
             client_id = c.oauth2_access_token.client_id.encode("ascii")
             # OAuth2 ratelimits are per user-app combination
@@ -1099,6 +1101,11 @@ class MinimalController(BaseController):
         if not c.error_page:
             ratelimit_throttled()
             ratelimit_agents()
+
+        # Allow opting out of the `websafe_json` madness
+        if "WANT_RAW_JSON" not in request.environ:
+            want_raw_json = request.params.get("raw_json", "") == "1"
+            request.environ["WANT_RAW_JSON"] = want_raw_json
 
         c.allow_framing = False
 
@@ -1217,7 +1224,7 @@ class MinimalController(BaseController):
         would_poison = any((k not in CACHEABLE_COOKIES) for k in dirty_cookies)
 
         if c.user_is_loggedin or would_poison:
-            response.headers['Cache-Control'] = 'no-cache'
+            response.headers['Cache-Control'] = 'private, no-cache'
             response.headers['Pragma'] = 'no-cache'
 
         # save the result of this page to the pagecache if possible.  we
@@ -1350,8 +1357,9 @@ class MinimalController(BaseController):
         return request.path + utils.query_string(merged)
 
     def api_wrapper(self, kw):
-        data = simplejson.dumps(kw)
-        return filters.websafe_json(data)
+        if request.environ.get("WANT_RAW_JSON"):
+            return scriptsafe_dumps(kw)
+        return filters.websafe_json(simplejson.dumps(kw))
 
     def should_update_last_visit(self):
         if g.disallow_db_writes:
@@ -1400,7 +1408,7 @@ class OAuth2ResourceController(MinimalController):
             else:
                 c.user = UnloggedUser(get_browser_langs())
                 c.user_is_loggedin = False
-            c.oauth_client = OAuth2Client._byID(access_token.client_id)
+            c.oauth2_client = OAuth2Client._byID(access_token.client_id)
         except RequirementException:
             self._auth_error(401, "invalid_token")
 
@@ -1790,10 +1798,6 @@ class RedditController(OAuth2ResourceController):
             abort(304, 'not modified')
 
     def search_fail(self, exception):
-        from r2.lib.search import SearchException
-        if isinstance(exception, SearchException + (socket.error,)):
-            g.log.error("Search Error: %s" % repr(exception))
-
         errpage = pages.RedditError(_("search failed"),
                                     strings.search_failed)
 

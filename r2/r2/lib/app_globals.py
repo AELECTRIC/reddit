@@ -41,6 +41,7 @@ import pkg_resources
 import pytz
 
 from r2.config import queues
+import r2.lib.amqp
 from r2.lib.cache import (
     CacheChain,
     CL_ONE,
@@ -56,6 +57,7 @@ from r2.lib.cache import (
 )
 from r2.lib.configparse import ConfigValue, ConfigValueParser
 from r2.lib.contrib import ipaddress
+from r2.lib.eventcollector import EventQueue
 from r2.lib.lock import make_lock_factory
 from r2.lib.manager import db_manager
 from r2.lib.plugin import PluginLoader
@@ -71,6 +73,12 @@ from r2.lib.utils import config_gold_price, thread_dump
 
 
 LIVE_CONFIG_NODE = "/config/live"
+
+SEARCH_SYNTAXES = {
+        'cloudsearch': ('cloudsearch', 'lucene', 'plain'),
+        'solr': ('solr', 'plain'),
+        }
+
 SECRETS_NODE = "/config/secrets"
 
 
@@ -205,6 +213,7 @@ class Globals(object):
             'RL_AVG_REQ_PER_SEC',
             'RL_OAUTH_AVG_REQ_PER_SEC',
             'RL_LOGIN_AVG_PER_SEC',
+            'RL_SHARE_AVG_PER_SEC',
         ],
 
         ConfigValue.bool: [
@@ -262,6 +271,7 @@ class Globals(object):
 
         ConfigValue.tuple_of(ConfigValue.int): [
             'thumbnail_size',
+            'mobile_ad_image_size',
         ],
 
         ConfigValue.dict(ConfigValue.str, ConfigValue.int): [
@@ -279,6 +289,8 @@ class Globals(object):
             'nerds_email',
             'community_email',
             'smtp_server',
+            'events_collector_url',
+            'search_provider',
         ],
 
         ConfigValue.choice(ONE=CL_ONE, QUORUM=CL_QUORUM): [
@@ -319,12 +331,14 @@ class Globals(object):
             'spotlight_interest_nosub_p',
             'gold_revenue_goal',
             'invalid_key_sample_rate',
+            'events_collector_sample_rate',
         ],
         ConfigValue.tuple: [
             'fastlane_links',
             'listing_chooser_sample_multis',
             'discovery_srs',
             'proxy_gilding_accounts',
+            'mweb_blacklist_expressions',
         ],
         ConfigValue.str: [
             'listing_chooser_gold_multi',
@@ -337,6 +351,10 @@ class Globals(object):
             'welcomebar_messages',
             'sidebar_message',
             'gold_sidebar_message',
+        ],
+        ConfigValue.dict(ConfigValue.str, ConfigValue.int): [
+            'ticket_groups',
+            'ticket_user_fields', 
         ],
         ConfigValue.dict(ConfigValue.str, ConfigValue.float): [
             'pennies_per_server_second',
@@ -424,7 +442,7 @@ class Globals(object):
         self.queues = queues.declare_queues(self)
 
         self.extension_subdomains = dict(
-            m="mobile",
+            simple="mobile",
             i="compact",
             api="api",
             rss="rss",
@@ -450,6 +468,23 @@ class Globals(object):
             self.pkg_resources_working_set,
             "r2.provider.cdn",
             self.cdn_provider,
+        )
+        self.ticket_provider = select_provider(
+            self.config,
+            self.pkg_resources_working_set,
+            "r2.provider.support",
+            # TODO: fix this later, it refuses to pick up 
+            # g.config['ticket_provider'] value, so hardcoding for now.
+            # really, the next uncommented line should be:
+            #self.ticket_provider,
+            # instead of:
+            "zendesk",
+        )
+        self.image_resizing_provider = select_provider(
+            self.config,
+            self.pkg_resources_working_set,
+            "r2.provider.image_resizing",
+            self.image_resizing_provider,
         )
         self.startup_timer.intermediate("providers")
 
@@ -547,6 +582,8 @@ class Globals(object):
                                      self.RL_OAUTH_RESET_SECONDS)
 
         self.RL_LOGIN_MAX_REQS = int(self.config["RL_LOGIN_AVG_PER_SEC"] *
+                                     self.RL_RESET_SECONDS)
+        self.RL_SHARE_MAX_REQS = int(self.config["RL_SHARE_AVG_PER_SEC"] *
                                      self.RL_RESET_SECONDS)
 
         self.startup_timer.intermediate("configuration")
@@ -828,6 +865,11 @@ class Globals(object):
             i18n_git_path = os.path.join(os.path.dirname(I18N_PATH), ".git")
             self.record_repo_version("i18n", i18n_git_path)
 
+        # Initialize the amqp module globals, start the worker, etc.
+        r2.lib.amqp.initialize(self)
+
+        self.events = EventQueue()
+
         self.startup_timer.intermediate("revisions")
 
     def setup_complete(self):
@@ -942,3 +984,19 @@ class Globals(object):
         here.
         """
         pass
+
+    @property
+    def search(self):
+        if getattr(self, 'search_provider', None):
+            if type(self.search_provider) == str:
+                self.search_provider = select_provider(self.config,
+                                       self.pkg_resources_working_set,
+                                       "r2.provider.search",
+                                       self.search_provider,
+                                       )
+            return  self.search_provider
+        return None
+
+    @property
+    def search_syntaxes(self):
+        return SEARCH_SYNTAXES[self.config.get('search_provider')]

@@ -45,6 +45,8 @@ from r2.models import (
     LINK_FLAIR,
     LabeledMulti,
     Link,
+    ReadNextLink,
+    ReadNextListing,
     Mod,
     ModSR,
     MultiReddit,
@@ -52,6 +54,7 @@ from r2.models import (
     Printable,
     PromoCampaign,
     PromotionPrices,
+    IDBuilder,
     Random,
     RandomNSFW,
     RandomSubscription,
@@ -102,6 +105,7 @@ from r2.lib import hooks, inventory, media
 from r2.lib import promote, tracking
 from r2.lib.captcha import get_iden
 from r2.lib.filters import (
+    scriptsafe_dumps,
     spaceCompress,
     _force_unicode,
     _force_utf8,
@@ -116,6 +120,7 @@ from r2.lib.menus import NavButton, NamedButton, NavMenu, PageNameNav, JsButton
 from r2.lib.menus import SubredditButton, SubredditMenu, ModeratorMailButton
 from r2.lib.menus import OffsiteButton, menu, JsNavMenu
 from r2.lib.normalized_hot import normalized_hot
+from r2.lib.providers import image_resizing
 from r2.lib.strings import plurals, rand_strings, strings, Score
 from r2.lib.utils import is_subdomain, title_to_url, query_string, UrlParser
 from r2.lib.utils import url_links_builder, median, to36
@@ -178,7 +183,12 @@ def responsive(res, space_compress=None):
         space_compress = not g.template_debug
 
     if is_api():
-        res = websafe_json(simplejson.dumps(res or ''))
+        res = res or u''
+        if not c.allowed_callback and request.environ.get("WANT_RAW_JSON"):
+            res = scriptsafe_dumps(res)
+        else:
+            res = websafe_json(simplejson.dumps(res))
+
         if c.allowed_callback:
             # Add a comment to the beginning to prevent the "Rosetta Flash"
             # XSS when an attacker controls the beginning of a resource
@@ -265,6 +275,8 @@ class Reddit(Templated):
         self.newsletterbar = None
         self.locationbar = None
         self.infobar = None
+        self.mobilewebredirectbar = None
+
         # generate a canonical link for google
         self.canonical_link = request.fullpath
         if c.render_style != "html":
@@ -308,6 +320,9 @@ class Reddit(Templated):
                 if feature.is_enabled('newsletter') and getattr(self, "show_newsletterbar", True):
                     self.newsletterbar = NewsletterBar()
 
+            if c.render_style == "compact":
+                self.mobilewebredirectbar = MobileWebRedirectBar()
+
             show_locationbar &= not c.user.pref_hide_locationbar
             if (show_locationbar and c.used_localized_defaults and
                     (not c.user_is_loggedin or
@@ -347,7 +362,10 @@ class Reddit(Templated):
                                       )
             report_form = ReportForm()
 
-            panes.extend([ShareLink(), report_form])
+            if not feature.is_enabled('improved_sharing'):
+                panes.append(ShareLink())
+
+            panes.append(report_form)
 
             if self.show_sidebar:
                 panes.extend([gold_comment, gold_link])
@@ -479,6 +497,18 @@ class Reddit(Templated):
                 buttons.append(NamedButton("banned", css_class="reddit-ban"))
             if is_moderator_with_perms('flair'):
                 buttons.append(NamedButton("flair", css_class="reddit-flair"))
+
+        if is_single_subreddit and is_moderator_with_perms('wiki'):
+            # append automod button if they have an AutoMod configuration
+            try:
+                WikiPage.get(c.site, "config/automoderator")
+                buttons.append(NamedButton(
+                    "automod",
+                    dest="../wiki/config/automoderator",
+                    css_class="reddit-automod",
+                ))
+            except tdb_cassandra.NotFound:
+                pass
 
         buttons.append(NamedButton("log", css_class="reddit-moderationlog"))
         if is_moderator_with_perms('posts'):
@@ -835,6 +865,7 @@ class Reddit(Templated):
             self.newsletterbar,
             self.infobar,
             self.locationbar,
+            self.mobilewebredirectbar,
             self.nav_menu,
             self._content,
         ))
@@ -844,9 +875,6 @@ class Reddit(Templated):
 
     def page_classes(self):
         classes = set()
-
-        if feature.is_enabled('old_markdown_style'):
-            classes.add('old-markdown')
 
         if c.user_is_loggedin:
             classes.add('loggedin')
@@ -859,6 +887,8 @@ class Reddit(Templated):
                 classes.add('moderator')
             if c.user.gold:
                 classes.add('gold')
+            if c.user.pref_highlight_controversial:
+                classes.add('show-controversial')
 
         if c.user_is_admin:
             if not isinstance(c.site, FakeSubreddit) and c.site._spam:
@@ -944,7 +974,7 @@ class RedditFooter(CachedTemplate):
                     OffsiteButton(_("Alien Blue iOS app"), "//alienblue.org"),
                     OffsiteButton(_("reddit AMA app"), "//redditama.reddit.com/"),
                     OffsiteButton(_("mobile beta"), "https://m.reddit.com"),
-                    NamedButton("buttons", True),
+                    NamedButton("buttons", False, nocname=True),
                 ],
                 title = _("apps & tools"),
                 type = "flat_vert",
@@ -1405,16 +1435,17 @@ class SearchPage(BoringPage):
                  syntax=None, converted_data=None, facets={}, sort=None,
                  recent=None, subreddits=None,
                  *a, **kw):
+        if feature.is_enabled('subreddit_search'):
+            self.extra_page_classes = self.extra_page_classes + ['combined-search-page']
         self.searchbar = SearchBar(prev_search=prev_search,
                                    search_params=search_params,
                                    site=site,
                                    simple=simple, restrict_sr=restrict_sr,
-                                   syntax=syntax, converted_data=converted_data,
-                                   facets=facets, sort=sort, recent=recent)
+                                   syntax=syntax, converted_data=converted_data)
         self.subreddits = subreddits
 
         # generate the over18 redirect url for the current search if needed
-        if not c.over18 and feature.is_enabled('safe_search'):
+        if kw['nav_menus'] and not c.over18 and feature.is_enabled('safe_search'):
             u = UrlParser(add_sr('/search'))
             if prev_search:
                 u.update_query(q=prev_search)
@@ -1426,11 +1457,18 @@ class SearchPage(BoringPage):
             kw['nav_menus'].append(MenuLink(title=_('enable NSFW results'),
                                             url=over18_url))
 
+        self.sr_facets = SubredditFacets(prev_search=prev_search, facets=facets,
+                                         sort=sort, recent=recent)
         BoringPage.__init__(self, pagename, robots='noindex', *a, **kw)
 
     def content(self):
-        return self.content_stack((self.searchbar, self.infobar,
+        if not feature.is_enabled('subreddit_search'):
+            return self.content_stack((self.searchbar, self.sr_facets, self.infobar,
                                    self.nav_menu, self.subreddits, self._content))
+
+        return self.content_stack((self.searchbar, self.infobar,
+                                   self.subreddits, self._content,
+                                   self.sr_facets))
 
 
 class MenuLink(Templated):
@@ -1483,10 +1521,11 @@ class LinkInfoPage(Reddit):
 
     create_reddit_box = False
     extra_page_classes = ['single-page']
+    metadata_image_width = 216
 
     def __init__(self, link = None, comment = None,
                  link_title = '', subtitle = None, num_duplicates = None,
-                 show_promote_button=False, *a, **kw):
+                 show_promote_button=False, sr_detail=False, *a, **kw):
 
         c.permalink_page = True
         expand_children = kw.get("expand_children", not bool(comment))
@@ -1494,7 +1533,7 @@ class LinkInfoPage(Reddit):
         wrapper = default_thing_wrapper(expand_children=expand_children)
 
         # link_listing will be the one-element listing at the top
-        self.link_listing = wrap_links(link, wrapper = wrapper)
+        self.link_listing = wrap_links(link, wrapper=wrapper, sr_detail=sr_detail)
 
         # add click tracker
         things = self.link_listing.things
@@ -1515,7 +1554,7 @@ class LinkInfoPage(Reddit):
         params = {'title':_force_unicode(link_title), 'site' : c.site.name}
         title = strings.link_info_title % params
         short_description = None
-        if link and link.selftext:
+        if link and link.selftext and not (link._spam or link._deleted):
             short_description = _truncate(link.selftext.strip(), MAX_DESCRIPTION_LENGTH)
         # only modify the title if the comment/author are neither deleted nor spam
         if comment and not comment._deleted and not comment._spam:
@@ -1560,11 +1599,15 @@ class LinkInfoPage(Reddit):
         self.show_promote_button = show_promote_button
         robots = "noindex,nofollow" if link._deleted or link._spam else None
 
+        if 'extra_js_config' not in kw:
+            kw['extra_js_config'] = {}
+
+        kw['extra_js_config'].update({
+            "cur_link": link._fullname,
+        });
+
         if c.can_embed:
             from r2.lib import embeds
-            if 'extra_js_config' not in kw:
-                kw['extra_js_config'] = {}
-
             kw['extra_js_config'].update({
                 "embed_inject_template": websafe(embeds.get_inject_template()),
             })
@@ -1580,7 +1623,21 @@ class LinkInfoPage(Reddit):
             "ttl": "600",  # re-fetch frequently to update vote/comment count
         }
         if not self.link.nsfw:
-            data["image"] = self._build_og_image()
+            image_data = self._build_og_image()
+            for key, value in image_data.iteritems():
+                # Although the spec[0] and their docs[1] say 'og:image' and
+                # 'og:image:url' are equivalent, Facebook doesn't actually take
+                # the thumbnail from the latter form.  Even if that gets fixed,
+                # it's likely the authors of other scrapers haven't read the
+                # spec in-depth, either, so we'll just keep on doing the more
+                # well-supported thing.
+                #
+                # [0]: http://ogp.me/#structured
+                # [1]: https://developers.facebook.com/docs/sharing/webmasters#images
+                if key == 'url':
+                    data['image'] = value
+                else:
+                    data["image:%s" % key] = value
 
         return data
 
@@ -1588,21 +1645,43 @@ class LinkInfoPage(Reddit):
         if self.link.media_object:
             media_embed = media.get_media_embed(self.link.media_object)
             if media_embed and media_embed.public_thumbnail_url:
-                return media_embed.public_thumbnail_url
+                return {
+                    'url': media_embed.public_thumbnail_url,
+                    'width': media_embed.width,
+                    'height': media_embed.height,
+                }
 
         if self.link.url and url_is_embeddable_image(self.link.url):
-            return self.link.url
+            return {'url': self.link.url}
+
+        preview_object = self.link.preview_image
+        if preview_object:
+            try:
+                return {
+                    'url': g.image_resizing_provider.resize_image(
+                                preview_object, self.metadata_image_width),
+                    'width': self.metadata_image_width,
+                }
+            except image_resizing.NotLargeEnough:
+                pass
 
         if self.link.has_thumbnail and self.link.thumbnail:
             # This is really not a great thumbnail for facebook right now
-            # because it's so small. We should look into scraping larger
-            # thumbnails.
-            return self.link.thumbnail
+            # because it's so small, but it's better than nothing.
+            data = {'url': self.link.thumbnail}
+
+            # Some old posts don't have a recorded size for whatever reason, so
+            # let's just ignore dimensions for them.
+            if hasattr(self.link, 'thumbnail_size'):
+                width, height = self.link.thumbnail_size
+                data['width'] = width
+                data['height'] = height
+            return data
 
         # Default to the reddit icon if we've got nothing else.  Force it to be
         # absolute because not all scrapers handle relative protocols or paths
         # well.
-        return static('icon.png', absolute=True)
+        return {'url': static('icon.png', absolute=True)}
 
     def _build_og_description(self, meta_description):
         if self.link.selftext:
@@ -1676,6 +1755,24 @@ class LinkInfoPage(Reddit):
 
     def rightbox(self):
         rb = Reddit.rightbox(self)
+
+        if (c.site and not c.default_sr and c.render_style == 'html' and
+                feature.is_enabled('read_next')):
+            link = self.link
+
+            def wrapper_fn(thing):
+                w = Wrapped(thing)
+                w.render_class = ReadNextLink
+                return w
+
+            query_obj = c.site.get_links('hot', 'all')
+            builder = IDBuilder(query_obj,
+                                wrap=wrapper_fn,
+                                skip=True, num=10)
+            listing = ReadNextListing(builder).listing()
+            if len(listing.things):
+                rb.append(ReadNext(c.site, listing.render()))
+
         if not (self.link.promoted and not c.user_is_sponsor):
             if c.user_is_admin:
                 from admin_pages import AdminLinkInfoBar
@@ -1737,12 +1834,9 @@ class CommentPane(Templated):
             c.domain_prefix,
             c.secure,
             c.user.pref_show_flair,
-            c.user.pref_show_link_flair,
-            c.can_save,
             c.can_embed,
             self.max_depth,
             self.edits_visible,
-            c.user.pref_highlight_controversial,
         )
 
     def __init__(self, article, sort, comment, context, num, **kw):
@@ -1775,20 +1869,21 @@ class CommentPane(Templated):
 
         if c.user_is_loggedin:
             sr = article.subreddit_slow
-            can_reply = sr.can_comment(c.user)
-            self.can_reply = can_reply
-            c.can_reply = can_reply
-            c.can_save = True
-
             try_cache &= not bool(sr.can_ban(c.user))
 
             user_threshold = c.user.pref_min_comment_score
             default_threshold = Account._defaults["pref_min_comment_score"]
             try_cache &= user_threshold == default_threshold
+
+        if c.user_is_loggedin:
+            sr = article.subreddit_slow
+            self.can_reply = sr.can_comment(c.user)
         else:
-            self.can_reply = False
-            c.can_reply = False
-            c.can_save = False
+            # assume that the common case is for loggedin users to see reply
+            # buttons and do the same for loggedout users so they can use the
+            # same cached page. reply buttons will be hidden client side for
+            # loggedout users
+            self.can_reply = article._age < article.subreddit_slow.archive_age
 
         builder = CommentBuilder(
             article, sort, comment=comment, context=context, num=num, **kw)
@@ -1829,8 +1924,6 @@ class CommentPane(Templated):
                     c.user = UnloggedUser([c.lang])
                     # Preserve the viewing user's flair preferences.
                     c.user.pref_show_flair = user.pref_show_flair
-                    c.user.pref_show_link_flair = user.pref_show_link_flair
-                    c.user.pref_highlight_controversial = user.pref_highlight_controversial
 
                     c.user_is_loggedin = False
 
@@ -2044,9 +2137,11 @@ class ProfilePage(Reddit):
                    NamedButton('gilded')]
 
         if votes_visible(self.user):
-            main_buttons += [NamedButton('liked'),
-                        NamedButton('disliked'),
-                        NamedButton('hidden')]
+            main_buttons += [
+                NamedButton('upvoted'),
+                NamedButton('downvoted'),
+                NamedButton('hidden'),
+            ]
 
         if c.user_is_loggedin and (c.user._id == self.user._id or
                                    c.user_is_admin):
@@ -2178,8 +2273,11 @@ class ProfileBar(Templated):
             self.show_private_info = False
 
         self.show_users_gold_expiration = (self.show_private_info or
-            user.pref_show_gold_expiration)
-        if user.gold and self.show_users_gold_expiration:
+            user.pref_show_gold_expiration) and user.gold
+        self.show_private_gold_info = (self.show_private_info and
+            (user.gold or user.gold_creddits > 0 or user.num_gildings > 0))
+
+        if self.show_users_gold_expiration:
             gold_days_left = (user.gold_expiration -
                               datetime.datetime.now(g.tz)).days
 
@@ -2205,6 +2303,14 @@ class ProfileBar(Templated):
                                 user.gold_creddits)
                 msg = msg % dict(creddits=user.gold_creddits)
                 self.gold_creddit_message = msg
+
+            if user.num_gildings > 0 and self.show_private_info:
+                gildings_msg = ungettext(
+                    "%(gildings)s gilding given out",
+                    "%(gildings)s gildings given out",
+                    user.num_gildings)
+                gildings_msg = gildings_msg % dict(gildings=user.num_gildings)
+                self.num_gildings_message = gildings_msg
 
             if not self.viewing_self:
                 self.goldlink = "/gold?goldtype=gift&recipient=" + user.name
@@ -2318,6 +2424,8 @@ class ClientInfoBar(InfoBar):
 
 class LocationBar(Templated): pass
 
+class MobileWebRedirectBar(Templated):
+    pass
 
 class SidebarMessage(Templated):
     """An info message box on the sidebar."""
@@ -3038,8 +3146,8 @@ class SearchBar(Templated):
     """
     def __init__(self, header=None, prev_search='', search_params={},
                  simple=False, restrict_sr=False, site=None, syntax=None,
-                 subreddit_search=False, converted_data=None, facets={},
-                 sort=None, recent=None, **kw):
+                 subreddit_search=False, converted_data=None,
+                 **kw):
         if header is None:
             header = _("search")
         self.header = header
@@ -3050,8 +3158,15 @@ class SearchBar(Templated):
                            simple=simple, restrict_sr=restrict_sr,
                            site=site, syntax=syntax,
                            converted_data=converted_data,
-                           subreddit_search=subreddit_search, facets=facets,
-                           sort=sort, recent=recent)
+                           subreddit_search=subreddit_search)
+
+
+class SubredditFacets(Templated):
+    def __init__(self, prev_search='', facets={}, sort=None, recent=None):
+        self.prev_search = prev_search
+
+        Templated.__init__(self, facets=facets, sort=sort, recent=recent)
+
 
 class Frame(Wrapped):
     """Frameset for the FrameToolbar used when a user hits /tb/. The
@@ -3172,7 +3287,6 @@ class NewLink(Templated):
 
 class ShareLink(CachedTemplate):
     def __init__(self, link_name = "", emails = None):
-        self.captcha = c.user.needs_captcha()
         self.username = c.user.name
         Templated.__init__(self, link_name=link_name)
 
@@ -3384,6 +3498,13 @@ class Ads(Templated):
         Templated.__init__(self)
         self.ad_url = g.ad_domain + "/ads/"
         self.frame_id = "ad-frame"
+
+
+class ReadNext(Templated):
+    def __init__(self, sr, links):
+        Templated.__init__(self)
+        self.sr = sr
+        self.links = links
 
 
 class Embed(Templated):
@@ -3632,9 +3753,13 @@ class FlairList(Templated):
             # user lookup was requested, but no user was found, so abort
             return []
 
-        query = Flair._query(Flair.c._thing1_id == c.site._id,
-                             Flair.c._name == 'flair',
-                             sort=asc('_thing2_id'))
+        query = Flair._query(
+            Flair.c._thing1_id == c.site._id,
+            Flair.c._name == 'flair',
+            sort=asc('_thing2_id'),
+            eager_load=True,
+            thing_data=True,
+        )
 
         # To maintain API compatibility we can't use the `before` or `after`s
         # returned by Builder.get_items(), since we use different logic to
@@ -4128,6 +4253,9 @@ class RenderableCampaign(Templated):
             # targeted to the frontpage
             self.targeting_data = '' if sr_name == Frontpage.name else sr_name
 
+        self.platform = campaign.platform
+        self.mobile_os = campaign.mobile_os
+
         Templated.__init__(self)
 
     @classmethod
@@ -4343,6 +4471,7 @@ class UserText(CachedTemplate):
                  expunged=False,
                  include_errors=True,
                  show_embed_help=False,
+                 admin_takedown=False,
                 ):
 
         css_class = "usertext"
@@ -4353,6 +4482,10 @@ class UserText(CachedTemplate):
 
         if text is None:
             text = ''
+            
+        # set the attribute for admin takedowns
+        if getattr(item, 'admin_takedown', False):
+            admin_takedown = True
 
         fullname = ''
         # Do not pass fullname on deleted things, unless we're admin
@@ -4377,6 +4510,7 @@ class UserText(CachedTemplate):
                                 expunged=expunged,
                                 include_errors=include_errors,
                                 show_embed_help=show_embed_help,
+                                admin_takedown=admin_takedown,
                                )
 
 class MediaEmbedBody(CachedTemplate):
@@ -5169,3 +5303,7 @@ class GeotargetNotice(Templated):
         more_link = "/wiki/targetingbycountrycity"
         self.text = text % {"link": more_link}
         Templated.__init__(self)
+
+
+class ShareClose(Templated):
+    pass

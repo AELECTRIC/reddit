@@ -508,6 +508,8 @@ module["reddit"] = LocalizedModule("reddit.js",
     "recommender.js",
     "action-forms.js",
     "embed.js",
+    "post-sharing.js",
+    "expando.js",
     "saved.js",
     "messages.js",
     PermissionsDataSource({
@@ -528,13 +530,6 @@ module["mobile"] = LocalizedModule("mobile.js",
     module["reddit"],
     "lib/jquery.lazyload.js",
     "compact.js"
-)
-
-
-module["button"] = Module("button.js",
-    "lib/jquery.cookie.js",
-    "jquery.reddit.js",
-    "blogbutton.js"
 )
 
 

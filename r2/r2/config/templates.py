@@ -30,18 +30,25 @@ def api(type, cls):
     tpm.add_handler(type, 'api-html', cls())
     tpm.add_handler(type, 'api-compact', cls())
 
+
+def register_api_templates(template_name, template_class):
+    for style in ('api', 'api-html', 'api-compact'):
+        tpm.add_handler(
+            name=template_name,
+            style=style,
+            handler=template_class,
+        )
+
+
 # blanket fallback rule
 api('templated', NullJsonTemplate)
 
 # class specific overrides
 api('link',          LinkJsonTemplate)
 api('promotedlink',  PromotedLinkJsonTemplate)
-api('comment',       CommentJsonTemplate)
 api('message',       MessageJsonTemplate)
 api('subreddit',     SubredditJsonTemplate)
 api('labeledmulti',  LabeledMultiJsonTemplate)
-api('morerecursion', MoreCommentJsonTemplate)
-api('morechildren',  MoreCommentJsonTemplate)
 api('reddit',        RedditJsonTemplate)
 api('panestack',     PanestackJsonTemplate)
 api('listing',       ListingJsonTemplate)
@@ -81,3 +88,8 @@ api('uploadedimage', UploadedImageJsonTemplate)
 api('modaction', ModActionTemplate)
 
 api('trophy', TrophyJsonTemplate)
+
+
+register_api_templates('comment', CommentJsonTemplate)
+register_api_templates('morerecursion', MoreCommentJsonTemplate)
+register_api_templates('morechildren', MoreCommentJsonTemplate)

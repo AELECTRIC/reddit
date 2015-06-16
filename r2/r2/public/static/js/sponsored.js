@@ -497,8 +497,19 @@ var exports = r.sponsored = {
     setup: function(inventory_by_sr, priceDict, isEmpty, userIsSponsor) {
         this.inventory = inventory_by_sr
         this.priceDict = priceDict
+
+        this.ALL_PLATFORMS = ['desktop', 'mobile'];
+
+        var $platformField = $('.platform-field');
+        this.$platformInputs = $platformField.find('input[name=platform]');
+        this.$mobileOSInputs = $platformField.find('.mobile-os-group input');
+
+        var render = this.render.bind(this);
+        this.$platformInputs.on('change', render);
+        this.$mobileOSInputs.on('change', render);
+
         if (isEmpty) {
-            this.render()
+            this.render();
             init_startdate()
             init_enddate()
             $("#campaign").find("button[name=create]").show().end()
@@ -640,8 +651,9 @@ var exports = r.sponsored = {
         return dates
     },
 
-    get_inventory_key: function(srname, collection, geotarget) {
+    get_inventory_key: function(srname, collection, geotarget, platform) {
         var inventoryKey = collection ? '#' + collection : srname
+        inventoryKey += "/" + platform
         if (geotarget.country != "") {
             inventoryKey += "/" + geotarget.country
         }
@@ -670,8 +682,10 @@ var exports = r.sponsored = {
         var srname = targeting.sr,
             collection = targeting.collection,
             geotarget = targeting.geotarget, 
+            platform = targeting.platform,
             inventoryKey = targeting.inventoryKey,
             dates = timing.dates;
+
         dates.sort(function(d1,d2){return d1 - d2})
         var end = new Date(dates[dates.length-1].getTime())
         end.setDate(end.getDate() + 5)
@@ -685,7 +699,8 @@ var exports = r.sponsored = {
                 region: geotarget.region,
                 metro: geotarget.metro,
                 startdate: $.datepicker.formatDate('mm/dd/yy', dates[0]),
-                enddate: $.datepicker.formatDate('mm/dd/yy', end)
+                enddate: $.datepicker.formatDate('mm/dd/yy', end),
+                platform: platform
             },
         });
     },
@@ -764,7 +779,7 @@ var exports = r.sponsored = {
     },
 
     getAvailableImpsByDay: function(dates, booked, inventoryKey) {
-       return _.map(dates, function(date) {
+        return _.map(dates, function(date) {
             var datestr = $.datepicker.formatDate('mm/dd/yy', date);
             var daily_booked = booked[datestr] || 0;
             return r.sponsored.inventory[inventoryKey][datestr] + daily_booked;
@@ -779,7 +794,7 @@ var exports = r.sponsored = {
             inventoryKey = targeting.inventoryKey,
             booked = this.get_booked_inventory($form, targeting.sr, 
                     targeting.geotarget, isOverride);
-        
+
         var minbid_amt = r.sponsored.get_real_min_bid();
         var maxbid_amt = r.sponsored.get_max_bid();
 
@@ -856,6 +871,25 @@ var exports = r.sponsored = {
         return _.max(prices);
     },
 
+    getPlatformTargeting: function() {
+      var platform = this.$platformInputs.filter(':checked').val();
+      var isMobile = platform === 'mobile' || platform === 'all';
+
+      if (isMobile) {
+        os = this.$mobileOSInputs.filter(':checked').map(function() {
+          return $(this).attr('value');
+        }).toArray().join(',');
+      } else {
+        os = null;
+      }
+
+      return {
+        platform: platform,
+        os: os,
+        isMobile: isMobile,
+      };
+    },
+
     get_targeting: function($form) {
         var isSubreddit = $form.find('input[name="targeting"][value="one"]').is(':checked'),
             collectionVal = $form.find('input[name="collection"]:checked').val(),
@@ -865,16 +899,15 @@ var exports = r.sponsored = {
             sr = isSubreddit ? $form.find('*[name="sr"]').val() : '',
             collection = isCollection ? collectionVal : null,
             displayName = isFrontpage ? 'the frontpage' : isCollection ? collection : sr,
-            priority = this.get_priority($form),
             canGeotarget = isFrontpage || this.userIsSponsor,
             country = canGeotarget && $('#country').val() || '',
             region = canGeotarget && $('#region').val() || '',
             metro = canGeotarget && $('#metro').val() || '',
             geotarget = {'country': country, 'region': region, 'metro': metro},
-            inventoryKey = this.get_inventory_key(sr, collection, geotarget),
+            inventoryKey = this.get_inventory_key(sr, collection, geotarget, platform),
             isValid = isFrontpage || (isSubreddit && sr) || (isCollection && collection);
 
-        return {
+        var targets = {
             'type': type,
             'displayName': displayName,
             'isValid': isValid,
@@ -882,8 +915,17 @@ var exports = r.sponsored = {
             'collection': collection,
             'canGeotarget': canGeotarget,
             'geotarget': geotarget,
-            'inventoryKey': inventoryKey,
         };
+
+        if (this.$platformInputs) {
+            var platform = this.getPlatformTargeting().platform;
+            targets['platform'] = platform;
+            targets['inventoryKey'] = this.get_inventory_key(sr, collection, geotarget, platform);
+        } else {
+            targets['inventoryKey'] = this.get_inventory_key(sr, collection, geotarget);
+        }
+
+        return targets;
     },
 
     get_timing: function($form) {
@@ -1017,21 +1059,54 @@ var exports = r.sponsored = {
     },
 
     fill_campaign_editor: function() {
-        var $form = $("#campaign"),
-            priority = this.get_priority($form),
+        var $form = $("#campaign");
+        var platformTargeting = this.getPlatformTargeting();
+        var platformOverride = platformTargeting.isMobile && platformTargeting.platform === 'mobile';
+
+        var $priorities = $form.find('*[name="priority"]');
+        if (platformOverride) {
+          $priorities.filter('[value="house"]').prop('checked', 'checked');
+          $priorities.filter(':not([value="house"])').prop('disabled', true);
+        } else {
+          if (this.currentPlatform === 'mobile') {
+            $priorities.filter('[value="standard"]').prop('checked', 'checked');
+          }
+          $priorities.prop('disabled', false);
+        }
+        this.currentPlatform = platformTargeting.platform;
+
+        var priority = this.get_priority($form),
             targeting = this.get_targeting($form),
             timing = this.get_timing($form),
             ndays = timing.duration,
             budget = this.get_budget($form),
             cpm = budget.cpm,
             impressions = budget.impressions,
-            checkInventory = targeting.isValid && priority.isCpm;
+            checkInventory = targeting.isValid;
 
         $(".duration").text(ndays + " " + ((ndays > 1) ? r._("days") : r._("day")))
         $(".price-info").text(r._("$%(cpm)s per 1,000 impressions").format({cpm: (cpm/100).toFixed(2)}))
         $form.find('*[name="impressions"]').val(r.utils.prettyNumber(impressions))
         $(".OVERSOLD").hide()
 
+        var $mobileOSGroup = $('.mobile-os-group');
+        var $mobileOSHiddenInput = $('#mobile_os');
+
+        if (platformTargeting.isMobile) {
+          var $mobileOSError = $mobileOSGroup.find('.error');
+
+          $mobileOSGroup.show();
+          $mobileOSHiddenInput.val(platformTargeting.os || '');
+
+          if (!platformTargeting.os) {
+            $mobileOSError.show();
+          } else {
+            $mobileOSError.hide();
+          }
+        } else {
+          $mobileOSGroup.hide();
+          $mobileOSHiddenInput.val('');
+        }
 
         if (targeting.isValid) {
             this.enable_form($form)
@@ -1044,37 +1119,40 @@ var exports = r.sponsored = {
             this.hide_cpm()
         }
 
-        if (checkInventory) {
-            this.check_inventory($form, targeting, timing, budget, priority.isOverride)
-        } else if (!priority.isCpm) {
-          var booked = this.get_booked_inventory($form, targeting.sr, 
-                                                 targeting.geotarget, priority.isOverride);
-          var availableByDate = this.getAvailableImpsByDay(timing.dates, booked,
-                                                           targeting.inventoryKey);
-          var totalImpsAvailable = _.reduce(availableByDate, sum, 0);    
+        if (!priority.isCpm && checkInventory) {
+          $.when(r.sponsored.get_check_inventory(targeting, timing)).then(
+            function() {
+              var booked = this.get_booked_inventory($form, targeting.sr,
+                                                     targeting.geotarget, priority.isOverride);
+              var availableByDate = this.getAvailableImpsByDay(timing.dates, booked,
+                                                               targeting.inventoryKey);
+              var totalImpsAvailable = _.reduce(availableByDate, sum, 0);
 
-
-          React.renderComponent(
-            React.DOM.div(null,
-              CampaignSet(null,
-                InfoText(null, r._('house campaigns, man.')),
-                CampaignOptionTable(null,
-                  CampaignOption({
-                    bid: null,
-                    end: timing.enddate,
-                    impressions: 'unsold ',
-                    isNew: !$("#campaign").parents('tr:first').length,
-                    primary: true,
-                    start: timing.startdate,
-                  })
-                )
-              ),
-              InfoText({impressions: totalImpsAvailable},
-                  r._('maximum possible impressions: %(impressions)s')
-              )
-            ),
-            document.getElementById('campaign-creator')
+              React.renderComponent(
+                React.DOM.div(null,
+                  CampaignSet(null,
+                    InfoText(null, r._('house campaigns, man.')),
+                    CampaignOptionTable(null,
+                      CampaignOption({
+                        bid: null,
+                        end: timing.enddate,
+                        impressions: 'unsold ',
+                        isNew: !$("#campaign").parents('tr:first').length,
+                        primary: true,
+                        start: timing.startdate,
+                      })
+                    )
+                  ),
+                  InfoText({impressions: totalImpsAvailable},
+                      r._('maximum possible impressions: %(impressions)s')
+                  )
+                ),
+                document.getElementById('campaign-creator')
+              );
+            }.bind(this)
           );
+        } else if (checkInventory) {
+            this.check_inventory($form, targeting, timing, budget, priority.isOverride)
         }
             
         if (targeting.canGeotarget) {
@@ -1499,6 +1577,18 @@ function edit_campaign($campaign_row) {
                         $input = campaign.find('*[name="' + input + '"]')
                     $input.val(val)
             })
+
+            var platform = $campaign_row.data('platform');
+            campaign.find('*[name="platform"][value="' + platform + '"]').prop("checked", "checked");
+
+            campaign.find('.mobile_os_group input').prop("checked", false);
+
+            var mobile_os_names = $campaign_row.data('mobile-os');
+            if (mobile_os_names) {
+              mobile_os_names.forEach(function(name) {
+                campaign.find('#mobile_os_' + name).prop("checked", "checked");
+              });
+            }
 
             /* set priority */
             var priorities = campaign.find('*[name="priority"]'),

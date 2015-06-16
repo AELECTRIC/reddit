@@ -39,14 +39,19 @@ from account import Account, AccountsActiveBySR, FakeAccount
 from printable import Printable
 from r2.lib.db.userrel import UserRel
 from r2.lib.db.operators import lower, or_, and_, not_, desc
-from r2.lib.errors import UserRequiredException
+from r2.lib.errors import UserRequiredException, RedditError
 from r2.lib.geoip import location_by_ips
 from r2.lib.memoize import memoize
 from r2.lib.permissions import ModeratorPermissionSet
 from r2.lib.utils import tup, last_modified_multi, fuzz_activity, \
     unicode_title_to_ascii
-from r2.lib.utils import timeago, summarize_markdown
-from r2.lib.cache import sgm, TransitionalCache
+from r2.lib.utils import (
+    timeago,
+    summarize_markdown,
+    in_chunks,
+    UrlParser,
+)
+from r2.lib.cache import sgm
 from r2.lib.strings import strings, Score
 from r2.lib.filters import _force_unicode
 from r2.lib.db import tdb_cassandra
@@ -278,9 +283,6 @@ class Subreddit(Thing, Printable, BaseSite):
     gold_limit = 100
     DEFAULT_LIMIT = object()
 
-    BASE_SELFTEXT_LENGTH = 15000
-    ONLY_SELFTEXT_LENGTH = 40000
-
     ICON_EXACT_SIZE = (240, 240)
     BANNER_MIN_SIZE = (640, 360)
     BANNER_MAX_SIZE = (1280, 720)
@@ -408,24 +410,26 @@ class Subreddit(Thing, Printable, BaseSite):
                     g.log.debug("Subreddit._by_name() ignoring invalid srname: %s", lname)
 
         if to_fetch:
-            def _fetch(lnames):
-                q = cls._query(lower(cls.c.name) == lnames,
-                               cls.c._spam == (True, False),
-                               limit = len(lnames),
-                               data=True)
-                try:
-                    srs = list(q)
-                except UnicodeEncodeError:
-                    print "Error looking up SRs %r" % (lnames,)
-                    raise
+            srids_by_name = g.cache.get_multi(
+                to_fetch.keys(), prefix='subreddit.byname', stale=True)
 
-                return dict((sr.name.lower(), sr._id)
-                            for sr in srs)
+            missing_srnames = set(to_fetch.keys()) - set(srids_by_name.keys())
+            if missing_srnames:
+                for srnames in in_chunks(missing_srnames, size=10):
+                    q = cls._query(
+                        lower(cls.c.name) == srnames,
+                        cls.c._spam == (True, False),
+                        limit=len(srnames),
+                        data=True,
+                    )
+                    fetched = {sr.name.lower(): sr._id for sr in q}
+                    srids_by_name.update(fetched)
+                    g.cache.set_multi(fetched, prefix='subreddit.byname')
 
             srs = {}
-            srids = sgm(g.cache, to_fetch.keys(), _fetch, prefix='subreddit.byname', stale=True)
+            srids = srids_by_name.values()
             if srids:
-                srs = cls._byID(srids.values(), data=True, return_dict=False, stale=stale)
+                srs = cls._byID(srids, data=True, return_dict=False, stale=stale)
 
             for sr in srs:
                 ret[to_fetch[sr.name.lower()]] = sr
@@ -460,13 +464,6 @@ class Subreddit(Thing, Printable, BaseSite):
         if self.link_type == "any":
             return set(("link", "self"))
         return set((self.link_type,))
-
-    @property
-    def selftext_max_length(self):
-        if self.link_type == "self":
-            return self.ONLY_SELFTEXT_LENGTH
-        else:
-            return self.BASE_SELFTEXT_LENGTH
 
     @property
     def allows_referrers(self):
@@ -831,6 +828,7 @@ class Subreddit(Thing, Printable, BaseSite):
         subscriber_srids = set()
         moderator_srids = set()
         contributor_srids = set()
+        banned_srids = set()
         srmembers_to_fetch = []
 
         if not user or not c.user_is_loggedin or not user.has_subscribed:
@@ -843,7 +841,7 @@ class Subreddit(Thing, Printable, BaseSite):
             srmembers_to_fetch.append('subscriber')
 
         if user and c.user_is_loggedin:
-            srmembers_to_fetch.extend(['moderator', 'contributor'])
+            srmembers_to_fetch.extend(['moderator', 'contributor', 'banned'])
 
         if srmembers_to_fetch:
             rels = SRMember._fast_query(wrapped, [user], srmembers_to_fetch)
@@ -856,14 +854,15 @@ class Subreddit(Thing, Printable, BaseSite):
                     moderator_srids.add(item._id)
                 elif rel_name == 'contributor':
                     contributor_srids.add(item._id)
+                elif rel_name == 'banned':
+                    banned_srids.add(item._id)
 
         target = "_top" if c.cname else None
         for item in wrapped:
             item.subscriber = item._id in subscriber_srids
             item.moderator = item._id in moderator_srids
-            item.contributor = (item.type != 'public' and
-                                    (item.moderator or
-                                     item._id in contributor_srids))
+            item.contributor = item._id in contributor_srids
+            item.banned = item._id in banned_srids
 
             if item.hide_subscribers and not c.user_is_admin:
                 item._ups = 0
@@ -982,10 +981,11 @@ class Subreddit(Thing, Printable, BaseSite):
 
         # /r/promos is public but has special handling to make it unviewable
         promo_sr_id = cls.get_promote_srid()
-        try:
-            sr_ids.remove(promo_sr_id)
-        except ValueError:
-            pass
+        if promo_sr_id:
+            try:
+                sr_ids.remove(promo_sr_id)
+            except ValueError:
+                pass
 
         NamedGlobals.set("popular_sr_ids", sr_ids)
         NamedGlobals.set("popular_over_18_sr_ids", over_18_sr_ids)
@@ -1126,18 +1126,11 @@ class Subreddit(Thing, Printable, BaseSite):
         self._incr("gilding_server_seconds", int(seconds))
 
     @classmethod
-    @memoize("get_promote_srid")
-    def get_promote_srid(cls, name='promos'):
-        try:
-            sr = cls._by_name(name, stale=True)
-        except NotFound:
-            sr = cls._new(name=name,
-                          title="promoted links",
-                          # negative author_ids make this unlisable
-                          author_id=-1,
-                          type="public",
-                          ip='0.0.0.0')
-        return sr._id
+    def get_promote_srid(cls):
+        if g.promo_srid36:
+            return int(g.promo_srid36, 36)
+        else:
+            return None
 
 
 class FakeSubreddit(BaseSite):
@@ -1680,8 +1673,11 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
     """Thing with special columns that hold Subreddit ids and properties."""
     _use_db = True
     _views = []
-    _defaults = dict(MultiReddit._defaults,
+    _bool_props = ('is_symlink', )
+    _defaults = dict(
+        MultiReddit._defaults,
         visibility='private',
+        is_symlink=False,
         description_md='',
         display_name='',
         copied_from=None,
@@ -1713,13 +1709,15 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
         self._owner = None
 
     @classmethod
-    def _byID(cls, ids, return_dict=True, properties=None, load_subreddits=True):
+    def _byID(cls, ids, return_dict=True, properties=None, load_subreddits=True,
+              load_linked_multis=True):
         ret = super(cls, cls)._byID(ids, return_dict=False,
                                     properties=properties)
         if not ret:
             return
 
-        ret = cls._load(ret, load_subreddits=load_subreddits)
+        ret = cls._load(ret, load_subreddits=load_subreddits,
+                        load_linked_multis=load_linked_multis)
         if isinstance(ret, cls):
             return ret
         elif return_dict:
@@ -1728,7 +1726,7 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
             return ret
 
     @classmethod
-    def _load(cls, things, load_subreddits=True):
+    def _load(cls, things, load_subreddits=True, load_linked_multis=True):
         things, single = tup(things, ret_is_single=True)
 
         # some objects are being loaded for the first time and need basic setup
@@ -1741,6 +1739,16 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
                 if t in never_loaded:
                     t._owner = owners[t.owner_fullname]
                     t._srs_loaded = False
+                    t._linked_multi = None
+
+        if load_linked_multis:
+            needs_linked_multis = [t.copied_from for t in things
+                                   if t.is_symlink and not t._linked_multi]
+            if needs_linked_multis:
+                multis = LabeledMulti._byID(needs_linked_multis, return_dict=True)
+                for t in things:
+                    if t.copied_from in needs_linked_multis:
+                        t._linked_multi = multis[t.copied_from]
 
         # some objects may have been retrieved from cache and need srs
         if load_subreddits:
@@ -1758,11 +1766,24 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
         return things[0] if single else things
 
     @property
+    def linked_multi(self):
+        return self._linked_multi
+
+    @property
     def sr_ids(self):
         return self.sr_props.keys()
 
     @property
     def srs(self):
+        if self.is_symlink:
+            if (not self.copied_from or self.copied_from == self._id
+                    or not self.linked_multi):
+                raise RedditError("Upstream symlinked multi can't be retrieved.")
+            if not self.linked_multi.can_view(self.owner):
+                raise RedditError("Upstream symlinked multi is not visible.")
+
+            return self.linked_multi.srs
+
         if not self._srs_loaded:
             g.log.error("%s: accessed subreddits without loading", self)
             self._srs = Subreddit._byID(
@@ -1777,6 +1798,9 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
     def sr_columns(self):
         # limit to max subreddit count, allowing a little fudge room for
         # cassandra inconsistency
+        if self.is_symlink:
+            return self.linked_multi.sr_columns
+
         remaining = self.MAX_SR_COUNT + 10
         sr_columns = {}
         for k, v in self._t.iteritems():
@@ -1922,13 +1946,24 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
         return obj
 
     @classmethod
-    def copy(cls, path, multi, owner):
-        obj = cls(_id=path, **multi._t)
-        obj.owner_fullname = owner._fullname
-        obj._commit()
-        obj._owner = owner
+    def copy(cls, path, multi, owner, symlink=False):
+        if symlink:
+            # remove all the sr_ids from the properties
+            props = {k: v for k, v in multi._t.iteritems()
+                     if k not in multi.sr_columns.keys()}
+            props["is_symlink"] = True
+        else:
+            props = multi._t
+
+        obj = cls(_id=path, **props)
         obj._srs = multi._srs
         obj._srs_loaded = multi._srs_loaded
+        obj.owner_fullname = owner._fullname
+        obj.copied_from = multi.path
+        obj._commit()
+        obj._linked_multi = multi if symlink else None
+        obj._owner = owner
+
         return obj
 
     @classmethod
@@ -1974,8 +2009,22 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
         for view in self._views:
             view.add_object(self)
 
+    def unlink(self):
+        if not self.is_symlink:
+            return
+
+        self._srs = self.srs
+        sr_props = dict.fromkeys(self.srs, {})
+        sr_ids, sr_columns = self.sr_props_to_columns(sr_props)
+        for attr, val in sr_columns.iteritems():
+            self.__setattr__(attr, val)
+
+        self.is_symlink = False
+
     def add_srs(self, sr_props):
         """Add/overwrite subreddit(s)."""
+        if self.is_symlink:
+            self.unlink()
         sr_ids, sr_columns = self.sr_props_to_columns(sr_props)
 
         if len(set(sr_columns) | set(self.sr_columns)) > self.MAX_SR_COUNT:
@@ -1991,6 +2040,9 @@ class LabeledMulti(tdb_cassandra.Thing, MultiReddit):
 
     def del_srs(self, sr_ids):
         """Delete subreddit(s)."""
+        if self.is_symlink:
+            self.unlink()
+
         sr_props = dict.fromkeys(tup(sr_ids), {})
         sr_ids, sr_columns = self.sr_props_to_columns(sr_props)
 
@@ -2146,6 +2198,32 @@ class DomainSR(FakeSubreddit):
     def get_links(self, sort, time):
         from r2.lib.db import queries
         return queries.get_domain_links(self.domain, sort, time)
+
+class SearchResultSubreddit(Subreddit):
+    _nodb = True
+
+    @classmethod
+    def add_props(cls, user, wrapped):
+        from r2.controllers.reddit_base import UnloggedUser
+        Subreddit.add_props(user, wrapped)
+        for item in wrapped:
+            url = UrlParser(item.path)
+            url.update_query(ref="search_subreddits")
+            item.search_path = url.unparse()
+            can_view = item.can_view(user)
+            if isinstance(user, UnloggedUser):
+                can_comment = item.type == "public"
+            else:
+                can_comment = item.can_comment(user)
+            if not can_view:
+                item.display_type = "private"
+            elif item.type == "archived":
+                item.display_type = "archived"
+            elif not can_comment:
+                item.display_type = "restricted"
+            else:
+                item.display_type = "public"
+        Printable.add_props(user, wrapped)
 
 Frontpage = DefaultSR()
 Sub = SubSR()

@@ -19,8 +19,6 @@
 # All portions of the code written by reddit are Copyright (c) 2006-2015 reddit
 # Inc. All Rights Reserved.
 ###############################################################################
-from copy import copy
-
 from pylons import c, g
 from r2.config import feature
 from r2.lib.menus import CommentSortMenu
@@ -32,6 +30,7 @@ from r2.lib.validator.validator import (
     VSRByName,
 )
 from r2.lib.errors import errors
+from r2.models import Subreddit, NotFound
 
 # Validators that map directly to Account._preference_attrs
 # The key MUST be the same string as the value in _preference_attrs
@@ -84,21 +83,23 @@ PREFS_VALIDATORS = dict(
     pref_enable_default_themes=VBoolean("enable_default_themes", False),
     pref_default_theme_sr=VSRByName("theme_selector", False),
     pref_other_theme=VSRByName("other_theme", False),
+    pref_beta=VBoolean('beta'),
 )
 
 
 def set_prefs(user, prefs):
     for k, v in prefs.iteritems():
-        setattr(user, k, v)
-        if k == 'pref_default_comment_sort':
-            # We have to do this copy-modify-assign shenanigans because if we
-            # just assign directly into `c.user.sort_options`, `Thing` doesn't
-            # know what happened and will wipe out our changes on save.
-            sort_options = copy(user.sort_options)
-            sort_options['front_sort'] = v
-            user.sort_options = sort_options
-            g.stats.simple_event('default_comment_sort.changed_in_prefs')
+        if k == 'pref_beta' and v and not getattr(user, 'pref_beta', False):
+            # If a user newly opted into beta, we want to subscribe them
+            # to the beta subreddit.
+            try:
+                sr = Subreddit._by_name(g.beta_sr)
+                sr.add_subscriber(user)
+            except NotFound:
+                g.log.warning("Could not find beta subreddit '%s'. It may "
+                              "need to be created." % g.beta_sr)
 
+        setattr(user, k, v)
 
 def filter_prefs(prefs, user):
     # replace stylesheet_override with other_theme if it doesn't exist

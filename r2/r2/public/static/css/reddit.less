@@ -1,6 +1,8 @@
-@import "components/components.less";
 @import "components/variables.less";
+@import "components/components.less";
 @import "markdown.less";
+@import "post-sharing.less";
+@import "search.less";
 
 .no-select {
     -webkit-user-select: none;
@@ -336,6 +338,29 @@ ul.flat-vert {text-align: left;}
 .user {color: gray;}
 .user .userkarma {
     font-weight: bold;
+}
+.beta-hint {
+    position: absolute;
+    cursor: inherit;
+    height: 24px;
+
+    opacity: 0.8;
+    &:hover {
+        opacity: 1;
+    }
+
+    a {
+        position: absolute;
+        text-indent: 24px;
+        white-space: nowrap;
+        overflow: hidden;
+        margin-left: -24px;
+        display: inline-block;
+        width: 20px;
+        height: 13px;
+        background: transparent data-uri('image/svg+xml;charset=UTF-8', '../flask.svg') center left no-repeat;
+        background-size: contain;
+    }
 }
 
 .pagename {
@@ -808,13 +833,26 @@ body > .content .link.compressed .midcol {
 }
 
 @moderator-color: #228822;
+@admin-color: #ff0011;
+
+.user-distinction {
+  color: #888;
+  font-size:x-small;
+  margin: 5px 5px 0px 5px;
+}
+
+.user-distinction .admin {
+  color: @admin-color;
+  text-decoration: none;
+  font-weight: bold;
+}
 
 .tagline { color:#888; font-size:x-small; }
 .tagline a {color: #369; text-decoration: none; }
 .tagline .friend    { color: orangered }
 .tagline .submitter { color: #0055df }
 .tagline .moderator, .green { color: @moderator-color }
-.tagline .admin { color: #ff0011; }
+.tagline .admin { color: @admin-color; }
 .tagline .alum { color: #BE1337; }
 .tagline a.author.admin { font-weight: bold }
 .tagline a:hover { text-decoration: underline }
@@ -1381,6 +1419,10 @@ body.with-listing-chooser.explore-page #header .pagename {
 
     p, form {
         margin: .5em;
+    }
+
+    a {
+      font-weight: bold;
     }
 
     a:hover {
@@ -2107,7 +2149,7 @@ a.star { text-decoration: none; color: #ff8b60 }
     }
 }
 
-.comment.controversial > .entry .score:after {
+body.show-controversial .comment.controversial > .entry .score:after {
   content: '†';
   position: relative;
   top: -2px;
@@ -2146,6 +2188,16 @@ a.star { text-decoration: none; color: #ff8b60 }
         .score, .live-timestamp {
             display: none;
         }
+    }
+}
+
+.admin_takedown {
+    background-color: #F7F7F7;
+    color: #888888;
+    padding: 3px;
+    
+    a:link {
+        color: #326699;
     }
 }
 
@@ -3039,39 +3091,6 @@ label + #moresearchinfo {
 .searchfail a {
     color: red;
     text-decoration: underline;
-}
-
-.searchfacets {
-  overflow: auto;
-  font-size: small;
-  white-space: pre-wrap;
-  border: 1px solid gray;
-  padding: 10px;
-  margin-top: -6px;
-  box-shadow: 0 4px 6px -1px #ccc inset;
-  background: #fefefe;
-}
-
-.searchfacets .title {
-  margin: 5px;
-}
-
-.searchfacets .facet:hover {
-  text-decoration: underline;
-}
-
-.searchfacets .list {
-  margin: 0px 0px 0px 10px;
-}
-
-li.searchfacet {
-  display: inline-block;
-  width: 15em;
-}
-
-.facet.count {
-  font-weight: bold;
-  color: #888888;
 }
 
 #search {
@@ -4169,6 +4188,15 @@ body.contact-us-page {
     background-color: #CEE3F8;
 }
 
+.toolbar .warning {
+    height: 20px;
+    background-color: #fa8072;
+    color: #000;
+    line-height: 20px;
+    font-weight: bold;
+    text-align: center;
+}
+
 .toolbar .left-side {
     height: 19px;
     float: left;
@@ -4208,7 +4236,6 @@ body.contact-us-page {
 .toolbar .right-side {
     float: right;
     background-color: #EFF7FF;
-    margin-top: -1px;
     height: 19px;
 }
 
@@ -4639,14 +4666,38 @@ form input[type=radio] {margin: 2px .5em 0 0; }
     font-size: x-small;
 }
 
-.nsfw-stamp acronym {
-    color: #ac3939;
+@color-nsfw-stamp: darken(@color-warning-red, 5%);
+@color-private-stamp: darken(@color-orange, 10%);
+@color-restricted-stamp: darken(@color-orange, 10%);
+@color-archived-stamp: lighten(@color-text-grey, 15%);
+
+.stamp {
     font-size: x-small;
-    text-decoration: none;
     padding: 0 2px;
-    border: 1px solid #d27979 !important;
+    border: 1px solid !important;
     border-radius: 3px;
 }
+
+.nsfw-stamp {
+    color: @color-nsfw-stamp;
+
+    acronym {
+        text-decoration: none;
+    }
+}
+
+.private-stamp {
+    color: @color-private-stamp;
+}
+
+.restricted-stamp {
+    color: @color-restricted-stamp;
+}
+
+.archived-stamp {
+    color: @color-archived-stamp;
+}
+
 
 .entry .buttons li.reported-stamp {
     border: 1px solid black !important;
@@ -6866,6 +6917,9 @@ div #campaign-field {
     .editor {
         @background-color: #CEE3F8;
         .image-field {
+            position: relative;
+            overflow: auto;
+
             input[type=file] {
                 margin-top: 10px;
                 margin-left: 0;
@@ -6875,6 +6929,9 @@ div #campaign-field {
                 bottom: 10px;
                 right: 20px;
             }
+            img {
+                max-width: 600px;
+            }
         }
         .image-field.has-image {
             .linefield-content {
@@ -6882,7 +6939,7 @@ div #campaign-field {
             }
             .img-preview-container {
                 position: absolute;
-                left: 20px;
+                left: 0;
                 top: 45px;
                 margin: 0;
                 padding: 5px;
@@ -7712,6 +7769,7 @@ dd { margin-left: 20px;  }
 .icon-menu .reddit-reported:before,
 .icon-menu .reddit-spam:before,
 .icon-menu .reddit-edited:before,
+.icon-menu .reddit-automod:before,
 .icon-menu .wikiaction-pages:before,
 .icon-menu .wikiaction-revisions:before,
 .icon-menu .reddit-ban:before,
@@ -7798,6 +7856,9 @@ dd { margin-left: 20px;  }
 .icon-menu .reddit-edited:before {
     background-image: url(../reddit_edited.png); /* SPRITE */
     margin-left: 1px;
+}
+.icon-menu .reddit-automod:before {
+    background-image: url(../reddit_automod.png); /* SPRITE */
 }
 .icon-menu .reddit-moderators:before {
     background-image: url(../shield.png); /* SPRITE */
@@ -8157,13 +8218,6 @@ form#banned textarea {
     margin-left: 0;
 }
 
-div.usertable .note {
-  color: #808080;
-  font-size: 0.8em;
-  white-space: normal;
-  margin-bottom: 10px;
-}
-
 .gold-accent h1,
 .gold-accent th {
     color: #6a4d00;
@@ -8222,8 +8276,8 @@ div.usertable .note {
     text-align: center;
 }
 
-.gold-expiration-info .gold-remaining + div {
-    margin-top: 10px;
+.gold-expiration-info div:last-of-type {
+    margin-top: -10px;
 }
 
 .gold-expiration-info .karma {
@@ -11031,4 +11085,79 @@ body.banned.deleted div#header {
             cursor: pointer;
         }
     }
+}
+
+.full-context-info {
+    .md {
+        padding: 10px 5px 5px;
+        border: 1px solid @color-warning-red;
+        border-radius: 5px;
+        background: @color-pale-grey;
+    }
+
+    .parent {
+        padding: 0 (@margin-small - 1) * 1px;
+    }
+
+    td {
+        color: @color-text-grey;
+    }
+
+    .arrow {
+        display: inline-block;
+        margin-right: 100px;
+
+        &:after {
+            display: inline-block;
+            margin-left: 20px;
+            width: 100px;
+        }
+    }
+
+    .arrow.unvoted {
+        &:after {
+            content: "did not vote";
+            margin-left: 0;
+        }
+    }
+
+    .arrow.vote-changed {
+        background: data-uri('../close.png') no-repeat;
+        background-size: 13px 13px;
+
+        &:after {
+            content: "changed vote";
+        }
+    }
+
+    .arrow.upmod:after {
+        content: "upvoted";
+    }
+
+    .arrow.downmod:after {
+        content: "downvoted";
+    }
+}
+
+.mobile-web-redirect {
+    background-color: #4a7fc5;
+    box-sizing: border-box;
+    color: #FFF;
+    font-size: 40px;
+    font-weight: bold;
+    padding: 30px 0;
+    text-align: center;
+    text-decoration: none;
+    text-transform: uppercase;
+    width: 100%;
+    display: block;
+    position: relative;
+    z-index: 50;
+}
+
+body:not(.loggedin) .comment-save-button,
+body:not(.loggedin) .give-gold-button,
+body:not(.loggedin) .reply-button,
+body:not(.loggedin) .report-button {
+    display: none;
 }

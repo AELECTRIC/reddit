@@ -25,10 +25,10 @@ from link import *
 from vote import *
 from report import *
 from subreddit import DefaultSR, AllSR, Frontpage
-
 from pylons import i18n, request, g
 from pylons.i18n import _
 
+from r2.config import feature
 from r2.lib.wrapped import Wrapped, CachedVariable
 from r2.lib import utils
 from r2.lib.db import operators
@@ -68,7 +68,7 @@ class Listing(object):
         builder_items = self.builder.get_items(*a, **kw)
         for item in self.builder.item_iter(builder_items):
             # rewrite the render method
-            if not hasattr(item, "render_replaced"):
+            if c.render_style != "api" and not hasattr(item, "render_replaced"):
                 item.render = replace_render(self, item, item.render)
                 item.render_replaced = True
         return builder_items
@@ -294,11 +294,26 @@ class LinkListing(Listing):
 
 
 class SearchListing(LinkListing):
-    def listing(self, *args, **kwargs):
+    def __init__(self, *a, **kw):
+        LinkListing.__init__(self, *a, **kw)
+        self.heading = kw.get('heading', None)
+        self.nav_menus = kw.get('nav_menus', None)
+
+    def listing(self, legacy_render_class=False, *args, **kwargs):
         wrapped = LinkListing.listing(self, *args, **kwargs)
-        self.subreddit_facets = self.builder.subreddit_facets
-        self.timing = time.time() - self.builder.start_time
+        if hasattr(self.builder, 'subreddit_facets'):
+            self.subreddit_facets = self.builder.subreddit_facets
+        if hasattr(self.builder, 'start_time'):
+            self.timing = time.time() - self.builder.start_time
+
+        if legacy_render_class:
+            wrapped.render_class = Listing
+
         return wrapped
+
+
+class ReadNextListing(Listing):
+    pass
 
 
 class NestedListing(Listing):

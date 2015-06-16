@@ -91,8 +91,8 @@ from r2.models.last_modified import LastModified
 from r2.lib.menus import CommentSortMenu
 from r2.lib.captcha import get_iden
 from r2.lib.strings import strings
-from r2.lib.filters import _force_unicode, _force_utf8, websafe_json, websafe, spaceCompress
 from r2.lib.template_helpers import format_html, header_url
+from r2.lib.filters import _force_unicode, _force_utf8, websafe_json, websafe, spaceCompress
 from r2.lib.db import queries
 from r2.lib import media
 from r2.lib.db import tdb_cassandra
@@ -103,10 +103,9 @@ from r2.lib.log import log_text
 from r2.lib.filters import safemarkdown
 from r2.lib.media import str_to_image
 from r2.controllers.api_docs import api_doc, api_section
-from r2.lib.search import SearchQuery
 from r2.controllers.oauth2 import require_oauth2_scope, allow_oauth2_access
 from r2.lib.template_helpers import add_sr, get_domain, make_url_protocol_relative
-from r2.lib.system_messages import notify_user_added
+from r2.lib.system_messages import notify_user_added, send_ban_message
 from r2.controllers.ipn import generate_blob, update_blob
 from r2.lib.lock import TimeoutExpired
 from r2.lib.csrf import csrf_exempt
@@ -530,9 +529,9 @@ class ApiController(RedditController):
                     return
 
         if not c.user_is_admin and kind == 'self':
-            if len(selftext) > sr.selftext_max_length:
+            if len(selftext) > Link.SELFTEXT_MAX_LENGTH:
                 c.errors.add(errors.TOO_LONG, field='text',
-                             msg_params={'max_length': sr.selftext_max_length})
+                    msg_params={'max_length': Link.SELFTEXT_MAX_LENGTH})
                 form.set_error(errors.TOO_LONG, 'text')
                 return
 
@@ -563,7 +562,8 @@ class ApiController(RedditController):
             l._commit()
             l.set_url_cache()
 
-        queries.queue_vote(c.user, l, True, request.ip, cheater=c.cheater)
+        queries.queue_vote(c.user, l, True, request.ip, cheater=c.cheater,
+                           event_data=g.events.event_base(request, c))
 
         if sr.should_ratelimit(c.user, 'link'):
             c.user.clog_quota('link', l)
@@ -572,6 +572,7 @@ class ApiController(RedditController):
 
         queries.new_link(l)
         l.update_search_index()
+        g.events.submit_event(l, request=request, context=c)
 
         if then == 'comments':
             path = add_sr(l.make_permalink_slow())
@@ -1041,15 +1042,6 @@ class ApiController(RedditController):
             if form.has_errors("ban_message", errors.TOO_LONG):
                 return
 
-            # don't let them ban with a custom message if the user won't
-            # actually be messaged
-            if ban_message and not friend.has_interacted_with(container):
-                c.errors.add(errors.USER_BAN_NO_MESSAGE, field="ban_message")
-                form.set_error(errors.USER_BAN_NO_MESSAGE, "ban_message")
-                return
-        else:
-            ban_message = None
-
         if type in self._sr_friend_types_with_permissions:
             if form.has_errors('type', errors.INVALID_PERMISSION_TYPE):
                 return
@@ -1136,7 +1128,12 @@ class ApiController(RedditController):
             table.find(".notfound").hide()
 
         if new:
-            notify_user_added(type, c.user, friend, container, ban_message)
+            if type == "banned":
+                if friend.has_interacted_with(container):
+                    send_ban_message(container, c.user, friend,
+                        ban_message, duration)
+            else:
+                notify_user_added(type, c.user, friend, container)
 
     @validatedForm(VGold(),
                    VModhash(),
@@ -1195,14 +1192,7 @@ class ApiController(RedditController):
     @validatedForm(
         VUser(),
         VModhash(),
-        VVerifyPassword("curpass", fatal=False),
-        # XXX: Is this necessary? Seems like it won't let people with
-        # passwords that would be invalid by current password rules clear
-        # their sessions.
-        password=VPasswordChange(
-            ['curpass', 'curpass'],
-            docs=dict(curpass="the user's current password")
-        ),
+        password=VVerifyPassword("curpass", fatal=False),
         dest=VDestination(),
     )
     def POST_clear_sessions(self, form, jquery, password, dest):
@@ -1232,12 +1222,8 @@ class ApiController(RedditController):
     @validatedForm(
         VUser(),
         VModhash(),
-        VVerifyPassword("curpass", fatal=False),
+        password=VVerifyPassword("curpass", fatal=False),
         force_https=VBoolean("force_https"),
-        password=VPasswordChange(
-            ["curpass", "curpass"],
-            docs=dict(curpass="the user's current password"),
-        ),
     )
     def POST_set_force_https(self, form, jquery, password, force_https):
         """Toggle HTTPS-only sessions, invalidating other sessions.
@@ -1730,12 +1716,18 @@ class ApiController(RedditController):
 
         if isinstance(item, Link) and not item.is_self:
             return abort(403, "forbidden")
+            
+        if getattr(item, 'admin_takedown', False):
+            # this item has been takendown by the admins,
+            # and not not be edited
+            # would love to use a 451 (legal) here, but pylons throws an error
+            return abort(403, "this content is locked and can not be edited")
 
         if isinstance(item, Comment):
             max_length = 10000
             admin_override = False
         else:
-            max_length = item.subreddit_slow.selftext_max_length
+            max_length = Link.SELFTEXT_MAX_LENGTH
             admin_override = c.user_is_admin
 
         if not admin_override and len(text) > max_length:
@@ -1748,8 +1740,9 @@ class ApiController(RedditController):
         original_text = item.body
         if isinstance(item, Comment):
             kind = 'comment'
-            removed_mentions = set(extract_user_mentions(original_text)) - \
-                set(extract_user_mentions(text))
+            prev_mentions = extract_user_mentions(original_text)
+            new_mentions = extract_user_mentions(text)
+            removed_mentions = prev_mentions - new_mentions
             item.body = text
         elif isinstance(item, Link):
             kind = 'link'
@@ -1777,7 +1770,7 @@ class ApiController(RedditController):
 
         item.update_search_index()
 
-        amqp.add_item('usertext_edited', item._fullname)
+        amqp.add_item('%s_text_edited' % kind, item._fullname)
 
         hooks.get_hook("thing.edit").call(
             thing=item, original_text=original_text)
@@ -1877,14 +1870,15 @@ class ApiController(RedditController):
             item, inbox_rel = Message._new(c.user, to, subject, comment,
                                            request.ip, parent=parent)
             item.parent_id = parent._id
-            if parent.display_author:
+            if parent.display_author and not getattr(parent, "signed", False):
                 item.display_to = parent.display_author
             item._commit()
         else:
             item, inbox_rel = Comment._new(c.user, link, parent_comment,
                                            comment, request.ip)
             queries.queue_vote(c.user, item, True, request.ip,
-                               cheater=c.cheater)
+                               cheater=c.cheater,
+                               event_data=g.events.event_base(request, c))
 
         if is_message:
             queries.new_message(item, inbox_rel)
@@ -1912,8 +1906,8 @@ class ApiController(RedditController):
     @validatedForm(
         VUser(),
         VModhash(),
-        VCaptcha(),
-        VRatelimit(rate_user=True, rate_ip=True, prefix="rate_share_"),
+        VRatelimitImproved(prefix='share', max_usage=g.RL_SHARE_MAX_REQS,
+                           rate_user=True, rate_ip=True),
         share_from=VLength('share_from', max_length=100),
         emails=ValidEmailsOrExistingUnames("share_to"),
         reply_to=ValidEmails("replyto", num=1), 
@@ -1935,79 +1929,104 @@ class ApiController(RedditController):
         # finding an error on one necessitates hiding the other error
         if shareform.has_errors("share_from", errors.TOO_LONG):
             shareform.find(".message-errors").children().hide()
+            return
         elif shareform.has_errors("message", errors.TOO_LONG):
             shareform.find(".share-form-errors").children().hide()
+            return
         # reply_to and share_to also share errors...
         elif shareform.has_errors("share_to", errors.BAD_EMAILS,
                                   errors.NO_EMAILS,
                                   errors.TOO_MANY_EMAILS):
             shareform.find(".reply-to-errors").children().hide()
+            return
         elif shareform.has_errors("replyto", errors.BAD_EMAILS,
                                   errors.TOO_MANY_EMAILS):
             shareform.find(".share-to-errors").children().hide()
-        # lastly, check the captcha.
-        elif shareform.has_errors("captcha", errors.BAD_CAPTCHA):
-            pass
+            return
         elif shareform.has_errors("ratelimit", errors.RATELIMIT):
-            pass
-        elif not sr.can_view(c.user):
+            return
+
+        if not link.subreddit_slow.can_view(c.user):
             return abort(403, 'forbidden')
+
+        emails, users = emails
+        jquery.things(link._fullname).set_text(".share", _("shared"))
+        shareform.html(format_html("<div class='clearleft'></div>"
+                                   "<p class='error'>%s</p>",
+                                   _("your link has been shared.")))
+
+        if getattr(link, "promoted", None) and link.disable_comments:
+            message = message + "\n\n" if message else ""
+            message += '\n%s\n\n%s\n\n' % (link.title, link.url)
+            email_message = pm_message = message
         else:
-            emails, users = emails
-            jquery.things(link._fullname).set_text(".share", _("shared"))
-            shareform.html(format_html("<div class='clearleft'></div>"
-                                       "<p class='error'>%s</p>",
-                                       _("your link has been shared.")))
+            message = message + "\n\n" if message else ""
+            message += '\n%s\n' % link.title
 
-            if getattr(link, "promoted", None) and link.disable_comments:
-                message = message + "\n\n" if message else ""
-                message += '\n%s\n\n%s\n\n' % (link.title, link.url)
+            urlparts = (get_domain(cname=c.cname, subreddit=False),
+                        link._id36)
+            url = "http://%s/tb/%s" % urlparts
+            url_parser = UrlParser(url)
+            url_parser.update_query(ref="share", ref_source="email")
+            email_source_url = url_parser.unparse()
+            url_parser.update_query(ref_source="pm")
+            pm_source_url = url_parser.unparse()
+
+            message_body = '\n%(source_url)s\n\n'
+
+            # Deliberately not translating this, as it'd be in the
+            # sender's language
+            if link.num_comments:
+                count = ("There are currently %(num_comments)s comments " +
+                         "on this link.  You can view them here:")
+                if link.num_comments == 1:
+                    count = ("There is currently %(num_comments)s " +
+                             "comment on this link.  You can view it here:")
+                numcom = count % {'num_comments': link.num_comments}
+                message_body = message_body + "%s\n\n" % numcom
             else:
-                urlparts = (get_domain(cname=c.cname, subreddit=False),
-                            link._id36)
-                url = "http://%s/tb/%s" % urlparts
-                message = message + "\n\n" if message else ""
-                message += '\n%s\n\n%s\n\n' % (link.title, url)
+                message_body = message_body + "You can leave a comment here:\n\n"
 
-                # Deliberately not translating this, as it'd be in the
-                # sender's language
-                if link.num_comments:
-                    count = ("There are currently %(num_comments)s comments " +
-                             "on this link.  You can view them here:")
-                    if link.num_comments == 1:
-                        count = ("There is currently %(num_comments)s " +
-                                 "comment on this link.  You can view it here:")
-                    numcom = count % {'num_comments': link.num_comments}
-                    message = message + "%s\n\n" % numcom
-                else:
-                    message = message + "You can leave a comment here:\n\n"
+            url = add_sr(link.make_permalink_slow(), force_hostname=True)
+            url_parser = UrlParser(url)
+            url_parser.update_query(ref="share", ref_source="email")
+            email_comments_url = url_parser.unparse()
+            url_parser.update_query(ref_source="pm")
+            pm_comments_url = url_parser.unparse()
 
-                url = add_sr(link.make_permalink_slow(), force_hostname=True)
-                message = message + url
-            
-            # E-mail everyone
-            emailer.share(link, emails, from_name = share_from or "",
-                          body = message or "", reply_to = reply_to or "")
+            message_body += '%(comments_url)s'
+            email_message = message + message_body % {
+                    "source_url": email_source_url,
+                    "comments_url": email_comments_url,
+                }
+            pm_message = message + message_body % {
+                    "source_url": pm_source_url,
+                    "comments_url": pm_comments_url,
+                }
+        
+        # E-mail everyone
+        emailer.share(link, emails, from_name = share_from or "",
+                      body = email_message or "", reply_to = reply_to or "")
 
-            # Send the PMs
-            subject = "%s has shared a link with you!" % c.user.name
-            # Prepend this subject to the message - we're repeating ourselves
-            # because it looks very abrupt without it.
-            message = "%s\n\n%s" % (subject,message)
-            
-            for target in users:
-                
-                m, inbox_rel = Message._new(c.user, target, subject,
-                                            message, request.ip)
-                # Queue up this PM
-                amqp.add_item('new_message', m._fullname)
+        # Send the PMs
+        subject = "%s has shared a link with you!" % c.user.name
+        # Prepend this subject to the message - we're repeating ourselves
+        # because it looks very abrupt without it.
+        pm_message = "%s\n\n%s" % (subject, pm_message)
+        
+        for target in users:
+            m, inbox_rel = Message._new(c.user, target, subject,
+                                        pm_message, request.ip)
+            # Queue up this PM
+            amqp.add_item('new_message', m._fullname)
 
-                queries.new_message(m, inbox_rel)
+            queries.new_message(m, inbox_rel)
 
-            #set the ratelimiter
-            if should_ratelimit:
-                VRatelimit.ratelimit(rate_user=True, rate_ip = True,
-                                     prefix = "rate_share_")
+        g.stats.simple_event('share.email_sent', len(emails))
+        g.stats.simple_event('share.pm_sent', len(users))
+
+        # Set the ratelimiter.
+        VRatelimitImproved.ratelimit('share', rate_user=True, rate_ip=True)
 
     @require_oauth2_scope("vote")
     @noresponse(VUser(),
@@ -2060,8 +2079,8 @@ class ApiController(RedditController):
                else None)
 
         queries.queue_vote(user, thing, dir, request.ip, vote_info=vote_info,
-                           store=store,
-                           cheater=c.cheater)
+                           store=store, cheater=c.cheater,
+                           event_data=g.events.event_base(request, c))
 
     @require_oauth2_scope("modconfig")
     @validatedForm(VSrModerator(perms='config'),
@@ -3068,9 +3087,9 @@ class ApiController(RedditController):
     @require_oauth2_scope("report")
     @noresponse(VUser(),
                 VModhash(),
-                thing = VByName('id', thing_cls=Link))
+                links=VByName('id', thing_cls=Link, multiple=True, limit=50))
     @api_doc(api_section.links_and_comments)
-    def POST_hide(self, thing):
+    def POST_hide(self, links):
         """Hide a link.
 
         This removes it from the user's default view of subreddit listings.
@@ -3078,22 +3097,26 @@ class ApiController(RedditController):
         See also: [/api/unhide](#POST_api_unhide).
 
         """
-        if not thing: return
-        thing._hide(c.user)
+        if not links:
+            return abort(400)
+
+        LinkHidesByAccount._hide(c.user, links)
 
     @require_oauth2_scope("report")
     @noresponse(VUser(),
                 VModhash(),
-                thing = VByName('id'))
+                links=VByName('id', thing_cls=Link, multiple=True, limit=50))
     @api_doc(api_section.links_and_comments)
-    def POST_unhide(self, thing):
+    def POST_unhide(self, links):
         """Unhide a link.
 
         See also: [/api/hide](#POST_api_hide).
 
         """
-        if not thing: return
-        thing._unhide(c.user)
+        if not links:
+            return abort(400)
+
+        LinkHidesByAccount._unhide(c.user, links)
 
 
     @csrf_exempt
@@ -3368,6 +3391,8 @@ class ApiController(RedditController):
             Subreddit.subscribe_defaults(c.user)
 
             if action == "sub":
+                SubredditParticipationByAccount.mark_participated(c.user, sr)
+
                 if sr.add_subscriber(c.user):
                     sr._incr('_ups', 1)
                 else:
@@ -3483,6 +3508,9 @@ class ApiController(RedditController):
         if link:
             if form.has_errors("link", errors.BAD_FLAIR_TARGET):
                 return
+
+            if not c.user_is_admin and not link.can_flair_slow(c.user):
+                abort(403)
 
             link.set_flair(text, css_class, set_by=c.user)
         else:
@@ -4186,8 +4214,12 @@ class ApiController(RedditController):
         exclude = Subreddit.default_subreddits()
 
         faceting = {"reddit":{"sort":"-sum(text_relevance)", "count":20}}
-        results = SearchQuery(query, sort="relevance", faceting=faceting, num=0,
-                              syntax="plain").run()
+        try:
+            results = g.search.SearchQuery(query, sort="relevance",
+                                           faceting=faceting, num=0,
+                                           syntax="plain").run()
+        except g.search.SearchException:
+            abort(500)
 
         sr_results = []
         for sr, count in results.subreddit_facets:

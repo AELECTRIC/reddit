@@ -36,8 +36,6 @@ function close_menus(event) {
     }
 };
 
-function hover_open_menu(menu) { };
-
 function select_tab_menu(tab_link, tab_name) {
     var target = "tabbedpane-" + tab_name;
     var menu = $(tab_link).parent().parent().parent();
@@ -46,17 +44,6 @@ function select_tab_menu(tab_link, tab_name) {
     menu.find(".tabbedpane").each(function() {
         this.style.display = (this.id == target) ? "block" : "none";
       });
-}
-
-function update_user(form) {
-  try {
-    var user = $(form).find('input[name="user"]').val();
-    form.action += "/" + user;
-  } catch (e) {
-    // ignore
-  }
-
-  return true;
 }
 
 function post_user(form, where) {
@@ -143,14 +130,6 @@ function post_multipart_form(form, where) {
     return true;
 }
 
-function emptyInput(elem, msg) {
-    if (! $(elem).val() || $(elem).val() == msg ) 
-        $(elem).addClass("gray").val(msg).attr("rows", 3);
-    else
-        $(elem).focus(function(){});
-};
-
-
 function showlang() {
     var content = $('#lang-popup').prop('innerHTML');
     var popup = new r.ui.Popup({
@@ -216,14 +195,6 @@ function read_thing(elem) {
     $.request("read_message", {"id": $(t).thing_id()});
 }
 
-function save_thing(elem) {
-    $(elem).thing().addClass("saved");
-}
-
-function unsave_thing(elem) {
-    $(elem).thing().removeClass("saved");
-}
-
 function click_thing(elem) {
     var t = $(elem);
     if (!t.hasClass("thing")) {
@@ -258,7 +229,8 @@ function hide_thing(elem) {
     } else {
         $thing.fadeOut(function() {
             $(this).toggleClass('hidden');
-            unexpando_child(elem);
+            var thing_id = $(this).thing_id();
+            $(document).trigger('hide_thing_' + thing_id);
         });
     }
 }
@@ -790,60 +762,6 @@ function select_form_tab(elem, to_show, to_hide) {
         .find(":input").attr("disabled", true);
 }
 
-/**** expando stuff ********/
-function expando_cache() {
-    if (!$.defined(reddit.thing_child_cache)) {
-        reddit.thing_child_cache = new Array();
-    }
-    return reddit.thing_child_cache;
-}
-
-function expando_child(elem) {
-    var child_cache = expando_cache();
-    var thing = $(elem).thing();
-
-    //swap button
-    var button = thing.find(".expando-button");
-    button
-        .addClass("expanded")
-        .removeClass("collapsed")
-        .get(0).onclick = function() {unexpando_child(elem)};
-
-    //load content
-    var expando = thing.find(".expando");
-    var key = thing.thing_id() + "_cache";
-    if (!child_cache[key]) {
-        $.request("expando",
-                  {"link_id":thing.thing_id()},
-                  function(r) {
-                      child_cache[key] = r;
-                      expando.html($.unsafe(r));
-                      $(document).trigger('expando_thing', thing)
-                  },
-                  false, "html", true);
-    }
-    else {
-        expando.html($.unsafe(child_cache[key]));
-        $(document).trigger('expando_thing', thing)
-    }
-    expando.show();
-    return false;
-}
-
-function unexpando_child(elem) {
-    var thing = $(elem).thing();
-    var button = thing.find(".expando-button");
-
-    if (button.length) {
-        button
-            .addClass("collapsed")
-            .removeClass("expanded")
-            .get(0).onclick = function() {expando_child(elem)};
-    }
-
-    thing.find(".expando").hide().empty();
-}
-
 /******* editting comments *********/
 function show_edit_usertext(form) {
     var edit = form.find(".usertext-edit");
@@ -916,11 +834,6 @@ function cancel_usertext(elem) {
     var t = $(elem);
     t.thing().find(".edit-usertext:first").parent("li").addBack().show(); 
     hide_edit_usertext(t.closest(".usertext"));
-}
-
-function save_usertext(elem) {
-    var t = $(elem).thing();
-    t.find(".edit-usertext:first").parent("li").addBack().show(); 
 }
 
 function reply(elem) {
@@ -1104,14 +1017,6 @@ var toolbar_p = function(expanded_size, collapsed_size) {
     };
 };
 
-function clear_all_langs(elem) {
-    $(elem).parents("td").find('input[type="checkbox"]').prop("checked", false);
-}
-
-function check_some_langs(elem) {
-    $(elem).parents("td").find("#some-langs").prop("checked", true);
-}
-
 function fetch_parent(elem, parent_permalink, parent_id) {
     var thing = $(elem).thing();
     var parent = '';
@@ -1252,7 +1157,20 @@ $(function() {
             $("#moresearchinfo").slideUp();
             event.preventDefault();
         });
+
+        var query = $('#search input[name="q"]').val();
+        $('.search-result-listing')
+          .find('.search-title, .search-link, .search-subreddit-link, .search-result-body')
+          .highlight(query);
         
+        // add new search page links to the 'recently viewed' links...
+        $(".search-result-link").find("a.search-title, a.thumbnail").mousedown(function() {
+            var fullname = $(this).closest('[data-fullname]').data('fullname');
+            if (fullname) {
+                add_thing_id_to_cookie(fullname, "recentclicks2");
+            }
+        });
+
         /* Select shortlink text on click */
         $("#shortlink-text").click(function() {
             $(this).select();
@@ -1306,40 +1224,9 @@ function show_friend(account_fullname) {
             });
 }
 
-function show_unfriend(account_fullname) {
-    var ua = $(".author.id-" + account_fullname).removeClass("friend")
-        .next(".userattrs");
-    ua.each(function() {
-            $(this).find("a.friend").remove();
-            if ($(this).find("a").length == 0) {
-                $(this).html("");
-            }
-        });
-}
-
 function save_href(link) {
   if (!link.attr("srcurl")){
     link.attr("srcurl", link.attr("href"));
   }
   return link;
-}
-
-function pure_domain(url) {
-    var domain = url.match(/:\/\/([^/]+)/)
-    if (domain) {
-        domain = domain[1].replace(/^www\./, '');
-    }
-    return domain;
-}
-
-function parse_domain(url) {
-    var domain = pure_domain(url);
-    if (!domain) {
-        /* Internal link? Get the SR name, if there is one */
-        var reddit = url.match(/\/r\/([^/]+)/)
-        if (reddit) {
-            domain = "self." + reddit[1].toLowerCase();
-        }
-    }
-    return domain;
 }

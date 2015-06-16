@@ -20,6 +20,8 @@
 # Inc. All Rights Reserved.
 ###############################################################################
 
+import sys
+
 import base64
 import cStringIO
 import hashlib
@@ -42,8 +44,10 @@ import requests
 
 from pylons import g
 
+from r2 import models
 from r2.config import feature
 from r2.lib import amqp, hooks
+from r2.lib.db.tdb_cassandra import NotFound
 from r2.lib.memoize import memoize
 from r2.lib.nymph import optimize_png
 from r2.lib.utils import (
@@ -52,6 +56,9 @@ from r2.lib.utils import (
     UrlParser,
     coerce_url_to_protocol,
     domain,
+    extract_urls_from_markdown,
+    get_requests_resp_json,
+    is_subdomain,
 )
 from r2.models.link import Link
 from r2.models.media_cache import (
@@ -97,13 +104,14 @@ def _image_entropy(img):
     return -sum(p * math.log(p, 2) for p in hist if p != 0)
 
 
-def _square_image(img):
-    """if the image is taller than it is wide, square it off. determine
+def _crop_image_vertically(img, target_height):
+    """crop image vertically the the specified height. determine
     which pieces to cut off based on the entropy pieces."""
     x,y = img.size
-    while y > x:
+
+    while y > target_height:
         #slice 10px at a time until square
-        slice_height = min(y - x, 10)
+        slice_height = min(y - target_height, 10)
 
         bottom = img.crop((0, y - slice_height, x, y))
         top = img.crop((0, 0, x, slice_height))
@@ -117,6 +125,12 @@ def _square_image(img):
         x,y = img.size
 
     return img
+
+
+def _square_image(img):
+    """if the image is taller than it is wide, square it off."""
+    width = img.size[0]
+    return _crop_image_vertically(img, width)
 
 
 def _prepare_image(image):
@@ -223,7 +237,7 @@ def _filename_from_content(contents):
     return base64.urlsafe_b64encode(hash_bytes).rstrip("=")
 
 
-def upload_media(image, file_type='.jpg'):
+def upload_media(image, file_type='.jpg', category='thumbs'):
     """Upload an image to the media provider."""
     f = tempfile.NamedTemporaryFile(suffix=file_type, delete=False)
     try:
@@ -254,7 +268,7 @@ def upload_media(image, file_type='.jpg'):
             optimize_jpeg(f.name)
         contents = open(f.name).read()
         file_name = _filename_from_content(contents) + file_type
-        return g.media_provider.put(file_name, contents)
+        return g.media_provider.put(category, file_name, contents)
     finally:
         os.unlink(f.name)
     return ""
@@ -262,7 +276,7 @@ def upload_media(image, file_type='.jpg'):
 
 def upload_stylesheet(content):
     file_name = _filename_from_content(content) + ".css"
-    return g.media_provider.put(file_name, content)
+    return g.media_provider.put('stylesheets', file_name, content)
 
 
 def _scrape_media(url, autoplay=False, maxwidth=600, force=False,
@@ -287,7 +301,7 @@ def _scrape_media(url, autoplay=False, maxwidth=600, force=False,
 
         scraper = Scraper.for_url(url, autoplay=autoplay)
         try:
-            thumbnail_image, media_object, secure_media_object = (
+            thumbnail_image, preview_object, media_object, secure_media_object = (
                 scraper.scrape())
         except (HTTPError, URLError) as e:
             if use_cache:
@@ -312,7 +326,7 @@ def _scrape_media(url, autoplay=False, maxwidth=600, force=False,
             thumbnail_size = thumbnail_image.size
             thumbnail_url = upload_media(thumbnail_image)
 
-        media = Media(media_object, secure_media_object,
+        media = Media(media_object, secure_media_object, preview_object,
                       thumbnail_url, thumbnail_size)
 
     # Store the media in the cache (if requested), possibly extending the ttl
@@ -326,27 +340,67 @@ def _scrape_media(url, autoplay=False, maxwidth=600, force=False,
     return media
 
 
+def _get_scrape_url(link):
+    if not link.is_self:
+        return link.url
+
+    urls = extract_urls_from_markdown(link.selftext)
+    second_choice = None
+    for url in urls:
+        p = UrlParser(url)
+        if p.is_reddit_url():
+            continue
+        # If we don't find anything we like better, use the first image.
+        if not second_choice:
+            second_choice = url
+        # This is an optimization for "proof images" in AMAs.
+        if is_subdomain(p.netloc, 'imgur.com') or p.has_image_extension():
+            return url
+
+    return second_choice
+
+
 def _set_media(link, force=False, **kwargs):
     if link.is_self:
-        return
+        if not feature.is_enabled('scrape_self_posts'):
+            return
+    else:
+        if not force and (link.has_thumbnail or link.media_object):
+            return
+
     if not force and link.promoted:
         return
-    elif not force and (link.has_thumbnail or link.media_object):
+
+    scrape_url = _get_scrape_url(link)
+
+    if not scrape_url:
+        if link.preview_object:
+            # If the user edited out an image from a self post, we need to make
+            # sure to remove its metadata.
+            link.set_preview_object(None)
+            link._commit()
         return
 
-    media = _scrape_media(link.url, force=force, **kwargs)
+    media = _scrape_media(scrape_url, force=force, **kwargs)
 
     if media and not link.promoted:
-        link.thumbnail_url = media.thumbnail_url
-        link.thumbnail_size = media.thumbnail_size
+        # While we want to add preview images to self posts for the new apps,
+        # let's not muck about with the old-style thumbnails in case that
+        # breaks assumptions.
+        if not link.is_self:
+            link.thumbnail_url = media.thumbnail_url
+            link.thumbnail_size = media.thumbnail_size
 
-        link.set_media_object(media.media_object)
-        link.set_secure_media_object(media.secure_media_object)
+            link.set_media_object(media.media_object)
+            link.set_secure_media_object(media.secure_media_object)
+        link.set_preview_object(media.preview_object)
 
         link._commit()
 
         hooks.get_hook("scraper.set_media").call(link=link)
-        amqp.add_item("new_media_embed", link._fullname)
+
+        if media.media_object or media.secure_media_object:
+            amqp.add_item("new_media_embed", link._fullname)
 
 
 def force_thumbnail(link, image_data, file_type=".jpg"):
@@ -359,13 +413,27 @@ def force_thumbnail(link, image_data, file_type=".jpg"):
     link._commit()
 
 
+def force_mobile_ad_image(link, image_data, file_type=".jpg"):
+    image = str_to_image(image_data)
+    image_width = image.size[0]
+    x,y = g.mobile_ad_image_size
+    max_height = image_width * y / x
+    image = _crop_image_vertically(image, max_height)
+    image.thumbnail(g.mobile_ad_image_size, Image.ANTIALIAS)
+    image_url = upload_media(image, file_type=file_type)
+
+    link.mobile_ad_url = image_url
+    link.mobile_ad_size = image.size
+    link._commit()
+
+
 def upload_icon(image_data, size):
     image = str_to_image(image_data)
     image.format = 'PNG'
     image.thumbnail(size, Image.ANTIALIAS)
     icon_data = _image_to_str(image)
     file_name = _filename_from_content(icon_data)
-    return g.media_provider.put(file_name + ".png", icon_data)
+    return g.media_provider.put('icons', file_name + ".png", icon_data)
 
 
 def _make_custom_media_embed(media_object):
@@ -425,16 +493,6 @@ class MediaEmbed(object):
         self.sandbox = sandbox
 
 
-def _make_thumbnail_from_url(thumbnail_url, referer):
-    if not thumbnail_url:
-        return
-    content_type, content = _fetch_url(thumbnail_url, referer=referer)
-    if not content:
-        return
-    image = str_to_image(content)
-    return _prepare_image(image)
-
-
 class Scraper(object):
     @classmethod
     def for_url(cls, url, autoplay=False, maxwidth=600):
@@ -453,7 +511,8 @@ class Scraper(object):
         return _ThumbnailOnlyScraper(url)
 
     def scrape(self):
-        # should return a 3-tuple of: thumbnail, media_object, secure_media_obj
+        # should return a 4-tuple of:
+        #     thumbnail, preview_object, media_object, secure_media_obj
         raise NotImplementedError
 
     @classmethod
@@ -470,42 +529,73 @@ class _ThumbnailOnlyScraper(Scraper):
         self.protocol = UrlParser(url).scheme
 
     def scrape(self):
-        thumbnail_url = self._find_thumbnail_image()
+        thumbnail_url, image_data = self._find_thumbnail_image()
+        if not thumbnail_url:
+            return None, None, None, None
+
         # When isolated from the context of a webpage, protocol-relative URLs
         # are ambiguous, so let's absolutify them now.
-        if thumbnail_url and thumbnail_url.startswith('//'):
+        if thumbnail_url.startswith('//'):
             thumbnail_url = coerce_url_to_protocol(thumbnail_url, self.protocol)
 
-        thumbnail = _make_thumbnail_from_url(thumbnail_url, referer=self.url)
-        return thumbnail, None, None
+        if not image_data:
+            _, image_data = _fetch_url(thumbnail_url, referer=self.url)
+
+        if not image_data:
+            return None, None, None, None
+
+        uid = _filename_from_content(image_data)
+        image = str_to_image(image_data)
+        storage_url = upload_media(image, category='previews')
+        width, height = image.size
+        preview_object = {
+            'uid': uid,
+            'url': storage_url,
+            'width': width,
+            'height': height,
+        }
+
+        thumbnail = _prepare_image(image)
+
+        return thumbnail, preview_object, None, None
 
     def _extract_image_urls(self, soup):
         for img in soup.findAll("img", src=True):
             yield urlparse.urljoin(self.url, img["src"])
 
     def _find_thumbnail_image(self):
+        """Find what we think is the best thumbnail image for a link.
+
+        Returns a 2-tuple of image url and, as an optimization, the raw image
+        data.  A value of None for the former means we couldn't find an image;
+        None for the latter just means we haven't already fetched the image.
+        """
         content_type, content = _fetch_url(self.url)
 
-        # if it's an image. it's pretty easy to guess what we should thumbnail.
+        # if it's an image, it's pretty easy to guess what we should thumbnail.
         if content_type and "image" in content_type and content:
-            return self.url
+            return self.url, content
 
         if content_type and "html" in content_type and content:
             soup = BeautifulSoup.BeautifulSoup(content)
         else:
-            return None
+            return None, None
 
-        # allow the content author to specify the thumbnail:
-        # <meta property="og:image" content="http://...">
+        # Allow the content author to specify the thumbnail using the Open
+        # Graph protocol: http://ogp.me/
         og_image = (soup.find('meta', property='og:image') or
                     soup.find('meta', attrs={'name': 'og:image'}))
         if og_image and og_image['content']:
-            return og_image['content']
+            return og_image['content'], None
+        og_image = (soup.find('meta', property='og:image:url') or
+                    soup.find('meta', attrs={'name': 'og:image:url'}))
+        if og_image and og_image['content']:
+            return og_image['content'], None
 
         # <link rel="image_src" href="http://...">
         thumbnail_spec = soup.find('link', rel='image_src')
         if thumbnail_spec and thumbnail_spec['href']:
-            return thumbnail_spec['href']
+            return thumbnail_spec['href'], None
 
         # ok, we have no guidance from the author. look for the largest
         # image on the page with a few caveats. (see below)
@@ -540,10 +630,15 @@ class _ThumbnailOnlyScraper(Scraper):
             if area > max_area:
                 max_area = area
                 max_url = image_url
-        return max_url
+
+        return max_url, None
 
 
 class _EmbedlyScraper(Scraper):
+    """Use Embedly to get information about embed info for a url.
+
+    http://embed.ly/docs/api/embed/endpoints/1/oembed
+    """
     EMBEDLY_API_URL = "https://api.embed.ly/1/oembed"
 
     def __init__(self, url, can_embed_securely, autoplay=False, maxwidth=600):
@@ -585,13 +680,28 @@ class _EmbedlyScraper(Scraper):
     def scrape(self):
         oembed = self._fetch_from_embedly(secure=False)
         if not oembed:
-            return None, None, None
+            return None, None, None, None
 
         if oembed.get("type") == "photo":
             thumbnail_url = oembed.get("url")
         else:
             thumbnail_url = oembed.get("thumbnail_url")
-        thumbnail = _make_thumbnail_from_url(thumbnail_url, referer=self.url)
+        if not thumbnail_url:
+            return None, None, None, None
+
+        content_type, content = _fetch_url(thumbnail_url, referer=self.url)
+        uid = _filename_from_content(content)
+        image = str_to_image(content)
+        storage_url = upload_media(image, category='previews')
+        width, height = image.size
+        preview_object = {
+            'uid': uid,
+            'url': storage_url,
+            'width': width,
+            'height': height,
+        }
+
+        thumbnail = _prepare_image(image)
 
         secure_oembed = {}
         if self.can_embed_securely:
@@ -599,6 +709,7 @@ class _EmbedlyScraper(Scraper):
 
         return (
             thumbnail,
+            preview_object,
             self._make_media_object(oembed),
             self._make_media_object(secure_oembed),
         )
@@ -624,7 +735,8 @@ class _EmbedlyScraper(Scraper):
 
 @memoize("media.embedly_services2", time=3600)
 def _fetch_embedly_service_data():
-    return requests.get("https://api.embed.ly/1/services/python").json
+    resp = requests.get("https://api.embed.ly/1/services/python")
+    return get_requests_resp_json(resp)
 
 
 def _fetch_embedly_services():
@@ -651,7 +763,7 @@ def run():
     @g.stats.amqp_processor('scraper_q')
     def process_link(msg):
         fname = msg.body
-        link = Link._by_fullname(msg.body, data=True)
+        link = Link._by_fullname(fname, data=True)
 
         try:
             TimeoutFunction(_set_media, 30)(link, use_cache=True)

@@ -51,9 +51,6 @@ def remove_mention_notification(mention):
 
 
 def monitor_mentions(comment):
-    if not isinstance(comment, Comment):
-        return
-
     if comment._spam or comment._deleted:
         return
 
@@ -64,7 +61,7 @@ def monitor_mentions(comment):
         return
 
     subreddit = comment.subreddit_slow
-    usernames = list(extract_user_mentions(comment.body, num=g.butler_max_mentions + 1))
+    usernames = extract_user_mentions(comment.body)
     inbox_class = Inbox.rel(Account, Comment)
 
     # If more than our allowed number of mentions were passed, don't highlight

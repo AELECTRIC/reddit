@@ -357,8 +357,7 @@ def compute_votes(wrapper, item):
     wrapper.downvotes = item._downs
     total_votes = max(item._ups + item._downs, 1)
     wrapper.upvote_ratio = float(item._ups) / total_votes
-    wrapper.is_controversial = (c.user.pref_highlight_controversial and
-                                _is_controversial(wrapper, item))
+    wrapper.is_controversial = _is_controversial(wrapper, item)
 
 def ip_span(ip):
     ip = websafe(ip)
@@ -452,7 +451,7 @@ def send_welcome_message(user):
 
 def send_system_message(user, subject, body, system_user=None,
                         distinguished='admin', repliable=False,
-                        add_to_sent=True, author=None):
+                        add_to_sent=True, author=None, signed=False):
     from r2.lib.db import queries
 
     if system_user is None:
@@ -469,6 +468,7 @@ def send_system_message(user, subject, body, system_user=None,
     item.distinguished = distinguished
     item.repliable = repliable
     item.display_author = system_user._id
+    item.signed = signed
     item._commit()
 
     try:

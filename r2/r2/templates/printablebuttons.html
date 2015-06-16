@@ -130,7 +130,7 @@
 
 <%def name="give_gold()">
   % if thing.show_givegold:
-    <li>
+    <li class="give-gold-button">
     <a href="/gold?goldtype=gift&months=1&thing=${thing.thing._fullname}"
         title="${_("give reddit gold in appreciation of this post.")}"
         class="give-gold login-required"
@@ -151,7 +151,7 @@
 <%def name="big_modbuttons(thing)">
   <span class="big-mod-buttons">
     <span role="radiogroup">
-      %if not getattr(thing, "moderator_banned", None):
+      %if not getattr(thing, "moderator_banned", None) or getattr(thing, "autobanned", False):
         ${pretty_button(_("spam"), "big_mod_action", -2, "negative")}
         ${pretty_button(_("remove"), "big_mod_action", -1, "neutral")}
       %endif
@@ -238,8 +238,12 @@
   %endif
   % if c.user_is_loggedin or not g.read_only_mode:
   <li class="share">
-    ${self.toggle_button("share-button", _("share"), _("cancel"),
-                         "share", "cancelShare", login_required = True)}
+    %if thing.show_new_post_sharing:
+      <a class="post-sharing-button" href="javascript: void 0;">${_("share")}</a>
+    %else:
+      ${self.toggle_button("share-button", _("share"), _("cancel"),
+                           "share", "cancelShare", login_required = True)}
+    %endif
   </li>
   % endif
   %if thing.is_loggedin:
@@ -338,16 +342,15 @@
         ${thing.embed_button.render()}
       </li>
     %endif
-    %if thing.can_save:
-      %if thing.saved:
-        <li class="comment-unsave-button save-button">
-          <a href="javascript:void(0)">${_("unsave")}</a>
-        </li>
-      %else:
-        <li class="comment-save-button save-button">
-          <a href="javascript:void(0)">${_("save")}</a>
-        </li>
-      %endif
+
+    %if thing.saved:
+      <li class="comment-unsave-button save-button">
+        <a href="javascript:void(0)">${_("unsave")}</a>
+      </li>
+    %else:
+      <li class="comment-save-button save-button">
+        <a href="javascript:void(0)">${_("save")}</a>
+      </li>
     %endif
 
     %if c.profilepage:
@@ -370,9 +373,11 @@
     %endif
 
     %if thing.is_author:
-      <li>
-        ${self.simple_button(_("edit"), "edit_usertext", css_class="edit-usertext")}
-      </li>
+      %if thing.editable:
+        <li>
+          ${self.simple_button(_("edit"), "edit_usertext", css_class="edit-usertext")}
+        </li>
+      %endif
       <li>
         %if thing.thing.inbox_replies_enabled:
           ${ynbutton(_("disable inbox replies"), _("inbox replies disabled"), "sendreplies",
@@ -389,7 +394,7 @@
     ${self.give_gold()}
 
     %if not getattr(thing, "suppress_reply_buttons", False) and thing.can_reply:
-      <li>
+      <li class="reply-button">
         ${self.simple_button(_("reply {verb}"), "reply")}
       </li>
     %endif

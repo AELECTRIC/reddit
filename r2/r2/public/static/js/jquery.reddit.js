@@ -350,15 +350,6 @@ $.things = function() {
     return $(sel);
 };
 
-$.fn.same_author = function() {
-    var aid = $(this).thing_id("author");
-    var ids = [];
-    $(".author.id-" + aid).each(function() {
-            ids.push(".thing.id-" + $(this).thing_id());
-        });
-    return $(ids.join(", "));
-};
-
 $.fn.things = function() {
     /* 
      * try to find all things that occur below a given selector, like:
@@ -790,5 +781,20 @@ $.cookie_read = function(name, prefix) {
 
     return {name: name, data: data}
 }
+
+$.fn.highlight = function(text) {
+  if (!text) { return this; }
+
+  var escaped = $.websafe(text.trim()).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  var regex = new RegExp("\\b" + escaped + "\\b", "gi");
+
+  return this.each(function() {
+    if (this.children.length) { return; }
+
+    this.innerHTML = this.innerHTML.replace(regex, function(matched) {
+      return "<mark>" + matched + "</mark>";
+    });
+  });
+};
 
 })(jQuery);

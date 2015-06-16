@@ -54,6 +54,15 @@ feature_some_flag = {"employee": true}
 # On for gold users
 feature_some_flag = {"gold": true}
 
+# On for users with the beta preference enabled
+feature_some_flag = {"beta": true}
+
+# On for logged in users
+feature_some_flag = {"loggedin": true}
+
+# On for logged out users
+feature_some_flag = {"loggedout": true}
+
 # On by URL, like ?feature=public_flag_name
 feature_some_flag = {"url": "public_flag_name"}
 
@@ -68,6 +77,9 @@ feature_some_flag = {"subdomains": ["beta"]}
 
 # On by OAuth client IDs
 feature_some_flag = {"oauth_clients: ["xyzABC123"]}
+
+# On for a percentage of loggedin users (0 being no users, 100 being all of them)
+feature_some_flag = {"percent_loggedin": 25}
 
 # For both admin and a group of users
 feature_some_flag = {"admin": true, "users": ["user1", "user2"]}

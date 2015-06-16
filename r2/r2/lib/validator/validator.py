@@ -28,9 +28,10 @@ from decimal import Decimal
 from pylons import c, g, request, response
 from pylons.i18n import _
 from pylons.controllers.util import abort
-from r2.config.extensions import api_type
+from r2.config import feature
+from r2.config.extensions import api_type, is_api
 from r2.lib import utils, captcha, promote, totp, ratelimit
-from r2.lib.filters import unkeep_space, websafe, _force_unicode
+from r2.lib.filters import unkeep_space, websafe, _force_unicode, _force_utf8
 from r2.lib.filters import markdown_souptest
 from r2.lib.db import tdb_cassandra
 from r2.lib.db.operators import asc, desc
@@ -42,7 +43,6 @@ from r2.lib.souptest import (
 from r2.lib.template_helpers import add_sr
 from r2.lib.jsonresponse import JQueryResponse, JsonResponse
 from r2.lib.log import log_text
-from r2.lib.menus import CommentSortMenu
 from r2.lib.permissions import ModeratorPermissionSet
 from r2.models import *
 from r2.models.promo import Location
@@ -87,7 +87,7 @@ class Validator(object):
     notes = None
     default_param = None
     def __init__(self, param=None, default=None, post=True, get=True, url=True,
-                 body=False, docs=None):
+                 get_multiple=False, body=False, docs=None):
         if param:
             self.param = param
         else:
@@ -95,6 +95,7 @@ class Validator(object):
 
         self.default = default
         self.post, self.get, self.url, self.docs = post, get, url, docs
+        self.get_multiple = get and get_multiple
         self.body = body
         self.has_errors = False
 
@@ -126,6 +127,11 @@ class Validator(object):
                 if self.post and (post_val or
                                   isinstance(post_val, cgi.FieldStorage)):
                     val = request.POST[p]
+                elif ((self.get_multiple and
+                      (self.get_multiple == True or
+                       p in self.get_multiple)) and
+                      request.GET.getall(p)):
+                    val = request.GET.getall(p)
                 elif self.get and request.GET.get(p):
                     val = request.GET[p]
                 elif self.url and url.get(p):
@@ -945,6 +951,9 @@ class VVerifyPassword(Validator):
             if self.fatal:
                 abort(403)
             self.set_error(errors.WRONG_PASSWORD)
+            return None
+        # bcrypt wants a bytestring
+        return _force_utf8(password)
 
     def param_docs(self):
         return {
@@ -1452,6 +1461,8 @@ class VThrottledLogin(VRequired):
 
         ratelimit_key = None
 
+        g.stats.event_count("login_throttle", "checked",
+                            sample_rate=0.1)
         try:
             if username:
                 username = username.strip()
@@ -1494,6 +1505,8 @@ class VThrottledLogin(VRequired):
                         return False
                 except ratelimit.RatelimitError as e:
                     g.log.info("ratelimitcache error (login): %s", e)
+                    g.stats.event_count("login_throttle", "limited",
+                                        sample_rate=0.1)
 
             try:
                 str(password)
@@ -1509,6 +1522,8 @@ class VThrottledLogin(VRequired):
                     ratelimit.record_usage(ratelimit_key, time_slice)
                 except ratelimit.RatelimitError as e:
                     g.log.info("ratelimitcache error (login): %s", e)
+                g.stats.event_count("login_throttle", "usage_recorded",
+                                    sample_rate=0.1)
             self.error()
             return False
 
@@ -1586,6 +1601,8 @@ class VExistingUname(VRequired):
         VRequired.__init__(self, item, errors.NO_USER, *a, **kw)
 
     def run(self, name):
+        if name:
+            name = name.strip()
         if name and name.startswith('~') and c.user_is_admin:
             try:
                 user_id = int(name[1:])
@@ -1817,34 +1834,6 @@ class VMenu(Validator):
         }
 
 
-class VTransitionaryMenu(VMenu):
-    """A temporary version of VMenu helping to transition to a new preference."""
-    def __init__(self, param):
-        # Our logic down below only makes sense for comment sorts, so let's
-        # hard-code that in as the menu.
-        VMenu.__init__(self, param, CommentSortMenu, remember=False)
-
-    def run(self, sort, where):
-        old_user_pref = c.user.sort_options.get('front_sort')
-        new_user_pref = c.user.pref_default_comment_sort
-
-        if c.user_is_loggedin and old_user_pref != new_user_pref:
-            # Even on view, if we catch an inconsistency between the
-            # preferences, we want to update them to match.  This allows us to
-            # transition over to the new one without having to wait for people
-            # to change their sort.
-            c.user.pref_default_comment_sort = old_user_pref
-            c.user._commit()
-
-            g.stats.simple_event('default_comment_sort.synchronized')
-
-        # Was a valid sort provided?
-        if sort not in self.nav._options:
-            sort = c.user.default_comment_sort # Includes fallbacks
-
-        return sort
-
-
 class VRatelimit(Validator):
     def __init__(self, rate_user = False, rate_ip = False,
                  prefix = 'rate_', error = errors.RATELIMIT, *a, **kw):
@@ -1855,7 +1844,7 @@ class VRatelimit(Validator):
         self.seconds = None
         Validator.__init__(self, *a, **kw)
 
-    def run (self):
+    def run(self):
         if g.disable_ratelimit:
             return
 
@@ -1863,13 +1852,16 @@ class VRatelimit(Validator):
             hook = hooks.get_hook("account.is_ratelimit_exempt")
             ratelimit_exempt = hook.call_until_return(account=c.user)
             if ratelimit_exempt:
+                self._record_event(self.prefix, 'exempted')
                 return
 
         to_check = []
         if self.rate_user and c.user_is_loggedin:
             to_check.append('user' + str(c.user._id36))
+            self._record_event(self.prefix, 'check_user')
         if self.rate_ip:
             to_check.append('ip' + str(request.ip))
+            self._record_event(self.prefix, 'check_ip')
 
         r = g.cache.get_multi(to_check, self.prefix)
         if r:
@@ -1877,6 +1869,11 @@ class VRatelimit(Validator):
             time = utils.timeuntil(expire_time)
 
             g.log.debug("rate-limiting %s from %s" % (self.prefix, r.keys()))
+            for key in r.keys():
+                if key.startswith('user'):
+                    self._record_event(self.prefix, 'user_limit_hit')
+                elif key.startswith('ip'):
+                    self._record_event(self.prefix, 'ip_limit_hit')
 
             # when errors have associated field parameters, we'll need
             # to add that here
@@ -1892,7 +1889,7 @@ class VRatelimit(Validator):
                 self.set_error(self.error)
 
     @classmethod
-    def ratelimit(self, rate_user = False, rate_ip = False, prefix = "rate_",
+    def ratelimit(cls, rate_user = False, rate_ip = False, prefix = "rate_",
                   seconds = None):
         to_set = {}
         if seconds is None:
@@ -1900,63 +1897,104 @@ class VRatelimit(Validator):
         expire_time = datetime.now(g.tz) + timedelta(seconds = seconds)
         if rate_user and c.user_is_loggedin:
             to_set['user' + str(c.user._id36)] = expire_time
+            cls._record_event(prefix, 'set_user_limit')
         if rate_ip:
             to_set['ip' + str(request.ip)] = expire_time
+            cls._record_event(prefix, 'set_ip_limit')
         g.cache.set_multi(to_set, prefix = prefix, time = seconds)
 
-class VDelay(Validator):
-    def __init__(self, category, *a, **kw):
-        self.category = category
+    @classmethod
+    def _record_event(cls, prefix, event):
+        g.stats.event_count('VRatelimit.%s' % prefix, event, sample_rate=0.1)
+
+
+class VRatelimitImproved(Validator):
+    """Enforce ratelimits on a function.
+
+    This is a newer version of VRatelimit that uses the ratelimit lib.
+    """
+
+    KEY_PREFIX = 'ratelimit'
+
+    def __init__(self, prefix, max_usage, rate_user=False, rate_ip=False,
+                 error=errors.RATELIMIT, *a, **kw):
+        """
+        Arguments:
+
+        prefix -- a string used to separate out ratelimits.  Set this to a
+                  unique value unless you have a very good reason not to.
+        max_usage -- the maximum number of times to allow the user or IP to
+                     perform this action in g.RL_RESET_SECONDS seconds.
+        rate_user -- should we limit the user account?
+        rate_ip -- should we limit the ip address?
+        (At least one of rate_user and rate_ip should be True for this function
+        to have any effect.)
+        error -- the error message to use when the limit is exceeded.
+        """
+        self.max_usage = max_usage
+        self.rate_user = rate_user
+        self.rate_ip = rate_ip
+        self.prefix = prefix
+        self.error = error
         self.seconds = None
         Validator.__init__(self, *a, **kw)
 
-    def run (self):
+    def run(self):
         if g.disable_ratelimit:
             return
-        key = "VDelay-%s-%s" % (self.category, request.ip)
-        prev_violations = g.cache.get(key)
-        if prev_violations:
-            time = utils.timeuntil(prev_violations["expire_time"])
-            remaining = prev_violations["expire_time"] - datetime.now(g.tz)
-            self.seconds = remaining.total_seconds()
-            if self.seconds >= 3:
+
+        if c.user_is_loggedin:
+            hook = hooks.get_hook("account.is_ratelimit_exempt")
+            ratelimit_exempt = hook.call_until_return(account=c.user)
+            if ratelimit_exempt:
+                self._record_event(self.prefix, 'exempted')
+                return
+
+        if self.rate_user and c.user_is_loggedin:
+            self._check_usage('user', c.user._id36)
+        if self.rate_ip:
+            self._check_usage('ip', request.ip)
+
+    def _check_usage(self, usage_type, key):
+        """Check ratelimit usage and set an error if necessary."""
+        ratelimit_key = '%s-%s-%s' % (self.KEY_PREFIX, usage_type, key)
+        time_slice = ratelimit.get_timeslice(g.RL_RESET_SECONDS)
+        usage = ratelimit.get_usage(ratelimit_key, time_slice)
+        self._record_event(self.prefix, 'check_' + usage_type)
+
+        if usage > self.max_usage:
+            g.log.debug('rate-limiting %s with %s used', ratelimit_key, usage)
+            self._record_event(self.prefix, '%s_limit_hit' % usage_type)
+
+            # When errors have associated field parameters, we'll need
+            # to add that here.
+            if self.error == errors.RATELIMIT:
+                period_end = datetime.utcfromtimestamp(
+                    time_slice.end).replace(tzinfo=pytz.UTC)
+                time = utils.timeuntil(period_end)
                 self.set_error(errors.RATELIMIT, {'time': time},
-                               field='vdelay', code=429)
+                               field='ratelimit', code=429)
+            else:
+                self.set_error(self.error)
 
     @classmethod
-    def record_violation(self, category, seconds = None, growfast=False):
-        if seconds is None:
-            seconds = g.RL_RESET_SECONDS
+    def ratelimit(cls, prefix, rate_user=False, rate_ip=False):
+        """Record usage of a resource."""
+        time_slice = ratelimit.get_timeslice(g.RL_RESET_SECONDS)
 
-        key = "VDelay-%s-%s" % (category, request.ip)
-        prev_violations = g.cache.get(key)
-        if prev_violations is None:
-            prev_violations = dict(count=0)
+        if rate_user and c.user_is_loggedin:
+            ratelimit_key = '%s-user-%s' % (cls.KEY_PREFIX, c.user._id36)
+            ratelimit.record_usage(ratelimit_key, time_slice)
+            cls._record_event(prefix, 'set_user_limit')
+        if rate_ip:
+            ratelimit_key = '%s-ip-%s' % (cls.KEY_PREFIX, request.ip)
+            ratelimit.record_usage(ratelimit_key, time_slice)
+            cls._record_event(prefix, 'set_ip_limit')
 
-        num_violations = prev_violations["count"]
+    @classmethod
+    def _record_event(cls, prefix, event):
+        g.stats.event_count('VRatelimitImproved.%s' % prefix, event, sample_rate=0.1)
 
-        if growfast:
-            multiplier = 3 ** num_violations
-        else:
-            multiplier = 1
-
-        max_duration = 8 * 3600
-        duration = min(seconds * multiplier, max_duration)
-
-        expire_time = (datetime.now(g.tz) +
-                       timedelta(seconds = duration))
-
-        prev_violations["expire_time"] = expire_time
-        prev_violations["duration"] = duration
-        prev_violations["count"] += 1
-
-        with g.make_lock("record_violation", "lock-" + key, timeout=5, verbose=False):
-            existing = g.cache.get(key)
-            if existing and existing["count"] > prev_violations["count"]:
-                g.log.warning("Tried to set %s to count=%d, but found existing=%d"
-                             % (key, prev_violations["count"], existing["count"]))
-            else:
-                g.cache.set(key, prev_violations, max_duration)
 
 class VCommentIDs(Validator):
     def run(self, id_str):
@@ -2862,4 +2900,37 @@ class VSubredditList(Validator):
     def param_docs(self):
         return {
             self.param: 'a list of subreddit names, line break delimited',
+        }
+
+
+class VResultTypes(Validator):
+    """
+    Validates a list of search result types, provided either as multiple
+    GET parameters or as a comma separated list.  Returns a set.
+    """
+    def __init__(self, param):
+        Validator.__init__(self, param, get_multiple=True)
+        self.options = ('link', 'sr')
+
+    def run(self, result_types):
+        if result_types and ',' in result_types[0]:
+            result_types = result_types[0].strip(',').split(',')
+
+        result_types = set(result_types) - {''}
+
+        if is_api():
+            result_types = result_types or {'link'}
+        elif feature.is_enabled('subreddit_search'):
+            result_types = result_types or {'link', 'sr'}
+        else:
+            result_types = {'link'}
+
+        return result_types
+
+    def param_docs(self):
+        return {
+            self.param: (
+                '(optional) comma-delimited list of result types '
+                '(`%s`)' % '`, `'.join(self.options)
+            ),
         }

@@ -20,14 +20,12 @@
 # Inc. All Rights Reserved.
 ###############################################################################
 
-from pylons import c, request
+from pylons import c, g, request
 from pylons.i18n import _, N_
 
 from r2.config import feature
 from r2.lib.db import operators
 from r2.lib.filters import _force_unicode
-from r2.lib.search import sorts as search_sorts
-from r2.lib.search import sr_sorts as sr_search_sorts
 from r2.lib.strings import StringHandler, plurals
 from r2.lib.utils import  class_property, query_string, timeago
 from r2.lib.wrapped import Styled
@@ -139,6 +137,7 @@ menu =   MenuHandler(hot          = _('hot'),
                      unmoderated  = _("unmoderated links"),
                      edited       = _("edited"),
                      employee     = _("employee"),
+                     automod      = _("automoderator config"),
                      
                      wikibanned        = _("ban wiki contributors"),
                      wikicontributors  = _("add wiki contributors"),
@@ -164,8 +163,8 @@ menu =   MenuHandler(hot          = _('hot'),
 
                      overview     = _("overview"),
                      submitted    = _("submitted"),
-                     liked        = _("liked"),
-                     disliked     = _("disliked"),
+                     upvoted      = _("upvoted"),
+                     downvoted    = _("downvoted"),
                      hidden       = _("hidden {toolbar}"),
                      deleted      = _("deleted"),
                      reported     = _("reported"),
@@ -310,6 +309,8 @@ class NavButton(Styled):
     def is_selected(self):
         stripped_path = _force_unicode(request.path.rstrip('/').lower())
 
+        if not (self.sr_path or c.default_sr):
+            return False
         if stripped_path == self.bare_path:
             return True
         site_path = c.site.user_path.lower() + self.bare_path
@@ -609,23 +610,18 @@ class CommentSortMenu(SortMenu):
 class SearchSortMenu(SortMenu):
     """Sort menu for search pages."""
     _default = 'relevance'
-    mapping = search_sorts
-    _options = mapping.keys()
+    _options = ('relevance', 'hot', 'top', 'new', 'comments')
 
-    @classmethod
-    def operator(cls, sort):
-        return cls.mapping.get(sort, cls.mapping[cls.default])
-
+    @class_property
+    def hidden_options(cls):
+        if feature.is_enabled('subreddit_search'):
+            return ['hot']
+        return []
 
 class SubredditSearchSortMenu(SortMenu):
     """Sort menu for subreddit search pages."""
     _default = 'relevance'
-    mapping = sr_search_sorts
-    _options = mapping.keys()
-
-    @classmethod
-    def operator(cls, sort):
-        return cls.mapping.get(sort, cls.mapping[cls.default])
+    _options = ('relevance', 'activity')
 
 
 class RecSortMenu(SortMenu):

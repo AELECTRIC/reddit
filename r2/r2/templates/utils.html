@@ -114,22 +114,6 @@ ${first_defined(kw[1:])}
   </${kind}>
 </%def>
 
-<%def name="success_field(success_str, kind='p', successful=False, hide='')">
-<${kind} class="error success">
-  %if successful:
-  ${success_str}
-  %endif
-</${kind}>
-<script type="text/javascript">
-  function fire_success() {
-  $('success').innerHTML = "${success_str}";
-  %if hide:
-  hide(document.getElementById('${hide}'));
-  %endif
-  }
-</script>
-</%def>
-
 <%def name="img_link(link_text, img, path, _id='', target='', img_id=None, size=None, **kw)">
   <% 
      if (not target or target == '_parent') and c.cname:
@@ -270,6 +254,7 @@ ${unsafe(txt)}
     <script type="text/javascript">
       function completedUploadImage (status, img_src, name, errors, form_id) {
         /* should only be called when the uploaded file is too large */
+        form_id = $.with_default(form_id, "${form_id}");
         if (status == "failed") {
           $("#${form_id}").find(".status").html("");
           for (var i in errors) {
@@ -319,7 +304,7 @@ ${unsafe(txt)}
                  onchange="$(this).next().prop('disabled', false); ${onchange}"/>
           <button id="submit-img" class="submit-img primary-button"
                   type="submit" name="upload" 
-                  onclick="$(this).siblings('.img-status').show().text('${jssafe(_('uploading'))}'); return true;"
+                  onclick="$(this).parent().addClass('uploading').find('.img-status').show().text('${jssafe(_('uploading'))}'); return true;"
                   disabled>
             ${_('upload')}
           </button>
@@ -331,8 +316,9 @@ ${unsafe(txt)}
        function create_new_image(name) {}
 
        function completedUploadImage(status, img_src, name, errors, form_id) {
-           form_id = $.with_default(form_id, "${form_id}");
-           var form = $("#" + form_id);
+           var form = form_id ? $("#" + form_id) : $('form.image-upload.uploading');
+           form.removeClass('uploading');
+
            if (status) 
                form.find(".img-status").show().html(status);
            else
@@ -636,4 +622,23 @@ ${unsafe(txt)}
   <acronym title="${_('Adult content: Not Safe For Work')}">
     ${_("NSFW")}
   </acronym>
+</%def>
+
+<%def name="thumbnail_img(thing)">
+  %if thing.thumbnail and not thing.thumbnail_sprited:
+    <%
+        if hasattr(thing, 'thumbnail_size'):
+            scaling_factor = 1
+            if thing.thumbnail_size[0] > g.thumbnail_size[0]:
+              # hidpi scaling, calculate in case hidpi changes definition in the future and
+              # we have multiple sets of image dimensions. Currently should always be 1 or 2.
+              # Width is always the maximum allowed, so we don't need to check height.
+              scaling_factor = thing.thumbnail_size[0] // g.thumbnail_size[0]
+
+            size_str = "width='%d' height='%d'" % (thing.thumbnail_size[0] // scaling_factor, thing.thumbnail_size[1] // scaling_factor)
+        else:
+            size_str = ""
+    %>
+    <img src="${make_url_protocol_relative(thing.thumbnail)}" ${size_str} alt="">
+  %endif
 </%def>
