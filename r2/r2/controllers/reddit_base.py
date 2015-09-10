@@ -110,7 +110,6 @@ from r2.models import (
     Random,
     RandomNSFW,
     RandomSubscription,
-    Sub,
     Subreddit,
     valid_admin_cookie,
     valid_feed,
@@ -204,7 +203,6 @@ class UnloggedUser(FakeAccount):
     COOKIE_NAME = "_options"
     allowed_prefs = {
         "pref_lang": VLang.validate_lang,
-        "pref_frame_commentspanel": bool,
         "pref_hide_locationbar": bool,
         "pref_use_global_defaults": bool,
     }
@@ -214,7 +212,6 @@ class UnloggedUser(FakeAccount):
         lang = browser_langs[0] if browser_langs else g.lang
         self._defaults = self._defaults.copy()
         self._defaults['pref_lang'] = lang
-        self._defaults['pref_frame_commentspanel'] = False
         self._defaults['pref_hide_locationbar'] = False
         self._defaults['pref_use_global_defaults'] = False
         if feature.is_enabled('new_user_new_window_preference'):
@@ -371,9 +368,6 @@ def set_subreddit():
                 domain = ".".join((g.domain_prefix, domain))
             path = 'http://%s%s' % (domain, sr.path)
             abort(301, location=BaseController.format_output_url(path))
-    elif sr_name == 'r':
-        #reddits
-        c.site = Sub
     elif '+' in sr_name:
         name_filter = lambda name: Subreddit.is_valid_name(name,
             allow_language_srs=True)
@@ -803,28 +797,39 @@ def enforce_https():
     if c.forced_loggedout or c.render_style == "js":
         return
 
+    # HACK: 404s in non-existent subreddits happen before we get here, and
+    # we can't redirect in the error controller. Can be removed once this
+    # function's behaviour doesn't vary by user
+    if request.environ.get('pylons.error_call', False):
+        return
+
+    is_api_request = is_api() or request.path.startswith("/api/")
     redirect_url = None
 
     # This is likely a request from an API client. Redirecting them or giving
     # them an HSTS grant is unlikely to stop them from making requests to HTTP.
-    if is_api() and not c.secure:
-        # Record the violation so we know who to talk to.
-        if c.user.https_forced:
-            g.stats.count_string('https.pref_violation', request.user_agent)
-            # TODO: 400 here after a grace period. Sending a user's cookies over
-            # HTTP when they asked you not to isn't nice.
+    if is_api_request and not c.secure:
+        # Record the violation so we know who to talk to to get this fixed.
+        # This is preferable to redirecting insecure API reqs right away
+        # because a lot of clients just break on redirect, it would create two
+        # requests for every request, and it wouldn't increase security.
+        ua = request.user_agent
+        g.stats.count_string('https.security_violation', ua)
+        # It's especially bad to send credentials over HTTP
+        if c.user_is_loggedin:
+            g.stats.count_string('https.loggedin_security_violation', ua)
 
         # They didn't send a login cookie, but their cookies indicate they won't
         # be authed properly unless we redirect them to the secure version.
         if have_secure_session_cookie() and not c.user_is_loggedin:
-            redirect_url = make_url_https(request.environ['FULLPATH'])
+            redirect_url = make_url_https(request.fullurl)
 
     need_grant = False
     grant = None
     # Forcing the users through the HSTS gateway probably wouldn't help much for
     # other render types since they're mostly made by clients that don't respect
     # HSTS.
-    if c.render_style in {"html", "compact", "mobile"}:
+    if c.render_style in {"html", "compact", "mobile"} and not is_api_request:
         if hsts_eligible():
             grant = g.hsts_max_age
             # They're forcing HTTPS but don't have a "secure_session" cookie?
@@ -845,7 +850,7 @@ def enforce_https():
                 # grant expire. redirect to the HTTPS version through the HSTS
                 # endpoint.
                 need_grant = True
-                redirect_url = make_url_https(request.environ['FULLPATH'])
+                redirect_url = make_url_https(request.fullurl)
         else:
             grant = 0
             if c.secure:
@@ -855,6 +860,10 @@ def enforce_https():
                     change_user_cookie_security(False)
                     need_grant = True
 
+        # Gradual rollout for HTTPS
+        if feature.is_enabled("https_redirect") and not c.secure:
+            redirect_url = make_url_https(request.fullurl)
+
     if feature.is_enabled("give_hsts_grants") and grant is not None:
         if request.host == g.domain and c.secure:
             # Always set an HSTS header if we can and we're on the base domain
@@ -862,7 +871,7 @@ def enforce_https():
         elif need_grant:
             # Definitely need to change the grant, but we're not on an origin
             # where we can modify it, redirect through one that can.
-            dest = redirect_url or request.environ['FULLPATH']
+            dest = redirect_url or request.fullurl
             redirect_url = hsts_modify_redirect(dest)
 
     if redirect_url:
@@ -989,6 +998,7 @@ class MinimalController(BaseController):
                         c.extension,
                         c.render_style,
                         location,
+                        feature.is_enabled("https_redirect"),
                         request.environ.get("WANT_RAW_JSON"),
                         cookies_key)
 
@@ -1061,19 +1071,26 @@ class MinimalController(BaseController):
             "X-Ratelimit-Remaining": str(reqs_remaining),
         }
 
+        event_type = None
+
         if reqs_remaining <= 0:
             if recent_reqs > (2 * max_reqs):
-                g.stats.event_count("ratelimit.exceeded", "hyperbolic")
+                event_type = "hyperbolic"
             else:
-                g.stats.event_count("ratelimit.exceeded", "over")
+                event_type = "over"
             if g.ENFORCE_RATELIMIT:
-                # For non-abort situations, the headers will be added in post(),
+                # For non-abort situations, the headers will be added in post()
                 # to avoid including them in a pagecache
                 request.environ['retry_after'] = time_slice.remaining
                 response.headers.update(c.ratelimit_headers)
                 abort(429)
         elif reqs_remaining < (0.1 * max_reqs):
-            g.stats.event_count("ratelimit.exceeded", "close")
+            event_type = "close"
+
+        if event_type is not None:
+            g.stats.event_count("ratelimit.exceeded", event_type)
+            if type_ == "oauth":
+                g.stats.count_string("oauth.{}".format(event_type), client_id)
 
     def pre(self):
         action = request.environ["pylons.routes_dict"].get("action")
@@ -1224,8 +1241,20 @@ class MinimalController(BaseController):
         would_poison = any((k not in CACHEABLE_COOKIES) for k in dirty_cookies)
 
         if c.user_is_loggedin or would_poison:
-            response.headers['Cache-Control'] = 'private, no-cache'
-            response.headers['Pragma'] = 'no-cache'
+            # Based off logged in <https://en.wikipedia.org/>,
+            # must-revalidate might not be necessary, but should force
+            # similar behaviour to no-cache (in theory.)
+            # Normally you'd prefer `no-store`, but many of reddit's
+            # listings are ephemeral, and the content might not even
+            # exist anymore if you force a refresh when hitting back.
+            cache_control = (
+                'private',
+                's-maxage=0',
+                'max-age=0',
+                'must-revalidate',
+            )
+            response.headers['Expires'] = '-1'
+            response.headers['Cache-Control'] = ', '.join(cache_control)
 
         # save the result of this page to the pagecache if possible.  we
         # mustn't cache things that rely on state not tracked by request_key
@@ -1642,19 +1671,19 @@ class RedditController(OAuth2ResourceController):
             # is the subreddit banned?
             if c.site.spammy() and not c.user_is_admin and not c.error_page:
                 ban_info = getattr(c.site, "ban_info", {})
-                if "message" in ban_info:
+                if "message" in ban_info and ban_info['message']:
                     message = ban_info['message']
                 else:
-                    sitelink = url_escape(add_sr("/"))
-                    subject = ("/r/%s has been incorrectly banned" %
-                                   c.site.name)
-                    link = ("/r/redditrequest/submit?url=%s&title=%s" %
-                                (sitelink, subject))
-                    message = strings.banned_subreddit_message % dict(
-                                                                    link=link)
-                errpage = pages.RedditError(strings.banned_subreddit_title,
-                                            message,
-                                            image="subreddit-banned.png")
+                    message = None
+
+                errpage = pages.InterstitialPage(
+                    _("banned"),
+                    content=pages.BannedInterstitial(
+                        message=message,
+                        ban_time=ban_info.get("banned_at"),
+                    ),
+                )
+
                 request.environ['usable_error_content'] = errpage.render()
                 self.abort404()
 
@@ -1663,29 +1692,37 @@ class RedditController(OAuth2ResourceController):
             # is sent in those cases - just a set of headers
             if (not c.site.can_view(c.user) and not c.error_page and
                     request.method != "OPTIONS"):
+                allowed_to_view = c.site.is_allowed_to_view(c.user)
+
                 if isinstance(c.site, LabeledMulti):
                     # do not leak the existence of multis via 403.
                     self.abort404()
-                elif c.site.type == 'gold_only' and not (c.user.gold or c.user.gold_charter):
-                    public_description = c.site.public_description
-                    errpage = pages.RedditError(
-                        strings.gold_only_subreddit_title,
-                        strings.gold_only_subreddit_message,
-                        image="subreddit-gold-only.png",
-                        sr_description=public_description,
+                elif not allowed_to_view and c.site.type == 'gold_only':
+                    errpage = pages.InterstitialPage(
+                        _("gold members only"),
+                        content=pages.GoldOnlyInterstitial(
+                            sr_name=c.site.name,
+                            sr_description=c.site.public_description,
+                        ),
+                    )
+                    request.environ['usable_error_content'] = errpage.render()
+                    self.abort403()
+                elif not allowed_to_view:
+                    errpage = pages.InterstitialPage(
+                        _("private"),
+                        content=pages.PrivateInterstitial(
+                            sr_name=c.site.name,
+                            sr_description=c.site.public_description,
+                        ),
                     )
                     request.environ['usable_error_content'] = errpage.render()
                     self.abort403()
                 else:
-                    public_description = c.site.public_description
-                    errpage = pages.RedditError(
-                        strings.private_subreddit_title,
-                        strings.private_subreddit_message,
-                        image="subreddit-private.png",
-                        sr_description=public_description,
-                    )
-                    request.environ['usable_error_content'] = errpage.render()
-                    self.abort403()
+                    if c.render_style != 'html':
+                        self.abort403()
+                    g.events.quarantine_event('quarantine_interstitial_view', c.site,
+                        request=request, context=c)
+                    return self.intermediate_redirect("/quarantine", sr_path=False)
 
             #check over 18
             if (c.site.over_18 and not c.over18 and

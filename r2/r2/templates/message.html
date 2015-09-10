@@ -41,7 +41,30 @@
 </%def>
 
 <%def name="thing_css_class(what)" buffered="True">
-${parent.thing_css_class(what)} ${"new" if thing.new else ""} ${"was-comment" if thing.was_comment else ""} ${"recipient" if thing.user_is_recipient else ""} ${"message-reply" if getattr(thing, "is_child", False) else ""} ${"message-parent" if getattr(thing, "is_parent", False) else ""} ${"focal" if getattr(thing, "focal", False) else ""} ${"gold" if getattr(thing, "distinguished", "") == "gold" else ""} ${"gold-auto" if getattr(thing, "distinguished", "") == "gold-auto" else ""}
+  ${parent.thing_css_class(what)}
+  ${"new" if thing.new else ""}
+  ${"was-comment" if thing.was_comment else ""}
+  ${"recipient" if thing.user_is_recipient else ""}
+  ${"message-reply" if getattr(thing, "is_child", False) else ""}
+  ${"message-parent" if getattr(thing, "is_parent", False) else ""}
+  ${"gold" if getattr(thing, "distinguished", "") == "gold" else ""}
+  ${"gold-auto" if getattr(thing, "distinguished", "") == "gold-auto" else ""}
+  ${"threaded" if getattr(thing, "threaded", "") else ""}
+  ${"most-recent" if getattr(thing, "most_recent", "") else ""}
+</%def>
+
+<%def name="thing_css_rowclass(what)">
+  ${parent.thing_css_rowclass(what)}
+  %if getattr(thing, "bar_color", "") and getattr(thing, "is_parent", False):
+    color-bar
+  %endif
+</%def>
+
+<%def name="thing_data_attributes(what)">
+  ${parent.thing_data_attributes(what)}
+  %if getattr(thing, "bar_color", "") and getattr(thing, "is_parent", False):
+    style="border-color:${thing.bar_color}"
+  %endif
 </%def>
 
 <%def name="tagline()">
@@ -93,6 +116,9 @@ ${parent.thing_css_class(what)} ${"new" if thing.new else ""} ${"was-comment" if
        %if thing.sr_id:
          <span class="correspondent reddit rounded">
            <a href="${thing.subreddit.path}message/moderator/inbox">
+            %if getattr(thing, "bar_color", False):
+              <span class="marker-dot" style="background-color: ${thing.bar_color};"></span>
+            %endif
              /r/${thing.subreddit.name}
            </a>
          </span>

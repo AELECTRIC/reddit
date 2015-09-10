@@ -20,24 +20,31 @@
 ## reddit Inc. All Rights Reserved.
 ###############################################################################
 
-<% from r2.lib.template_helpers import static %>
+<%!
+  from r2.lib.template_helpers import static
+%>
 
-<div class="content over18" style="text-align: center">
-  <p class="error">
-    ${_("you must be at least eighteen to view this")}
-  </p>
-  <img src="${static('over18.png')}" alt="" height="254" width="180" />
-  
-  <form method="post" action="" class="pretty-form"
-      ${"target='_top'" if c.cname else ""}>
-    <input type="hidden" name="uh" value="${c.modhash}" />
-    <p>
-      ${_("are you over eighteen and willing to see adult content?")}
-    </p>
-    <p>
-      <button type="submit" name="over18" value="yes">yes</button>
-      <button type="submit" name="over18" value="no">no</button>
-    </p>
-  </form>
-</div>
+<%namespace file="utils.html" import="_md"/>
 
+<%inherit file="interstitial.html"/>
+
+<%def name="interstitial_image_attrs()">
+  src="${static('interstitial-image-gold-only.png')}"
+  alt="${_('gold only')}"
+</%def>
+
+<%def name="interstitial_title()">
+  ${_("You must be a Reddit Gold member to view this super secret community")}
+</%def>
+
+<%def name="interstitial_message()">
+  ${_md("The moderators of this community have set it to [Reddit Gold only](/gold/about#gold-only-subreddits). You must be a [Reddit Gold member](/gold/about) to visit.")}
+</%def>
+
+<%def name="interstitial_buttons()">
+  <div class="buttons">
+    <a class="c-btn c-btn-primary" href="/gold">
+      ${_("get gold")}
+    </a>
+  </div>
+</%def>

@@ -39,7 +39,7 @@ from r2.config import feature
 from r2.config.extensions import is_api, API_TYPES, RSS_TYPES
 from r2.lib import hooks, recommender, embeds, pages
 from r2.lib.pages import *
-from r2.lib.pages.things import hot_links_by_url_listing, wrap_things
+from r2.lib.pages.things import hot_links_by_url_listing
 from r2.lib.pages import trafficpages
 from r2.lib.menus import *
 from r2.lib.admin_utils import check_cheating
@@ -55,7 +55,6 @@ from r2.lib.db.tdb_cassandra import MultiColumnQuery
 from r2.lib.strings import strings
 from r2.lib.validator import *
 from r2.lib import jsontemplates
-from r2.lib import sup
 import r2.lib.db.thing as thing
 from r2.lib.errors import errors, ForbiddenError
 from listingcontroller import ListingController
@@ -122,13 +121,18 @@ class FrontController(RedditController):
         rand.shuffle(names)
 
         def keep_fn(item):
-            return item.fresh and item.keep_item(item)
+            return (
+                item.fresh and
+                item.keep_item(item) and
+                item.subreddit.discoverable
+            )
 
         builder = IDBuilder(names, skip=True, keep_fn=keep_fn, num=1)
         links, first, last, before, after = builder.get_items()
 
         if links:
-            return self.redirect(add_sr("/tb/" + links[0]._id36))
+            redirect_url = links[0].make_permalink_slow(force_domain=True)
+            return self.redirect(redirect_url)
         else:
             return self.redirect(add_sr('/'))
 
@@ -194,7 +198,7 @@ class FrontController(RedditController):
               comment=VCommentID('comment',
                   docs={"comment": "(optional) ID36 of a comment"}),
               context=VInt('context', min=0, max=8),
-              sort=VOneOf('sort', CommentSortMenu.visible_options()),
+              sort=VOneOf('sort', CommentSortMenu._options),
               limit=VInt('limit',
                   docs={"limit": "(optional) an integer"}),
               depth=VInt('depth',
@@ -286,9 +290,11 @@ class FrontController(RedditController):
         infotext = None
         if request.GET.get('already_submitted'):
             submit_url = request.GET.get('submit_url') or article.url
-            resubmit_url = Link.resubmit_link(submit_url)
-            sr_resubmit_url = add_sr(resubmit_url)
-            infotext = strings.already_submitted % sr_resubmit_url
+            submit_title = request.GET.get('submit_title') or ""
+            resubmit_url = Link.resubmit_link(submit_url, submit_title)
+            if c.user_is_loggedin and c.site.can_submit(c.user):
+                resubmit_url = add_sr(resubmit_url)
+            infotext = strings.already_submitted % resubmit_url
 
         check_cheating('comments')
 
@@ -364,9 +370,17 @@ class FrontController(RedditController):
             c.referrer_policy = "always"
 
         suggested_sort_active = False
-        if not c.user.pref_ignore_suggested_sort and feature.is_enabled('default_sort'):
+        if not c.user.pref_ignore_suggested_sort:
             suggested_sort = article.sort_if_suggested()
         else:
+            suggested_sort = None
+
+        # Special override: if the suggested sort is Q&A, and a responder of
+        # the thread is viewing it, we don't want to suggest to them to view
+        # the thread in Q&A mode (as it hides many unanswered questions)
+        if (suggested_sort == "qa" and
+                c.user_is_loggedin and
+                c.user._id in article.responder_ids):
             suggested_sort = None
 
         if article.contest_mode:
@@ -387,8 +401,11 @@ class FrontController(RedditController):
                                        comment, context, num, **kw))
 
         subtitle_buttons = []
+        disable_comments = article.promoted and article.disable_comments
 
-        if c.focal_comment or context is not None:
+        if (c.focal_comment or
+            context is not None or
+            disable_comments):
             subtitle = None
         elif article.num_comments == 0:
             subtitle = _("no comments (yet)")
@@ -419,7 +436,10 @@ class FrontController(RedditController):
             suggested_sort=suggested_sort,
         )
 
-        res = LinkInfoPage(link=article, comment=comment,
+
+        res = LinkInfoPage(link=article,
+                           comment=comment,
+                           disable_comments=disable_comments,
                            content=displayPane,
                            page_classes=['comments-page'],
                            subtitle=subtitle,
@@ -817,8 +837,9 @@ class FrontController(RedditController):
         Data includes the subscriber count, description, and header image."""
         if not is_api() or isinstance(c.site, FakeSubreddit):
             return self.abort404()
-        wrapped_subreddit = wrap_things(c.site)[0]
-        return Reddit(content=wrapped_subreddit).render()
+        item = Wrapped(c.site, accounts_active_count=c.site.accounts_active)
+        Subreddit.add_props(c.user, [item])
+        return Reddit(content=item).render()
 
     @require_oauth2_scope("read")
     @api_doc(api_section.subreddits, uses_site=True)
@@ -829,14 +850,25 @@ class FrontController(RedditController):
 
     @require_oauth2_scope("read")
     @api_doc(api_section.subreddits, uses_site=True)
-    def GET_sticky(self):
-        """Get the post stickied to the current subreddit
+    @validate(
+        num=VInt("num",
+            min=1, max=Subreddit.MAX_STICKIES, num_default=1, coerce=True),
+    )
+    def GET_sticky(self, num):
+        """Redirect to one of the posts stickied in the current subreddit
 
-        Will 404 if there is not currently a sticky post in this subreddit
+        The "num" argument can be used to select a specific sticky, and will
+        default to 1 (the top sticky) if not specified.
+        Will 404 if there is not currently a sticky post in this subreddit.
 
         """
-        if c.site.sticky_fullname:
-            sticky = Link._by_fullname(c.site.sticky_fullname, data=True)
+        sticky_fullnames = c.site.get_sticky_fullnames()
+        if sticky_fullnames:
+            try:
+                fullname = sticky_fullnames[num-1]
+            except IndexError:
+                abort(404)
+            sticky = Link._by_fullname(fullname, data=True)
             self.redirect(sticky.make_permalink_slow())
         else:
             abort(404)
@@ -961,10 +993,11 @@ class FrontController(RedditController):
               recent=VMenu('t', TimeMenu, remember=False),
               restrict_sr=VBoolean('restrict_sr', default=False),
               include_facets=VBoolean('include_facets', default=False),
+              result_types=VResultTypes('type'),
               syntax=VOneOf('syntax', options=g.search_syntaxes))
     @api_doc(api_section.search, supports_rss=True, uses_site=True)
     def GET_search(self, query, num, reverse, after, count, sort, recent,
-                   restrict_sr, include_facets, syntax, sr_detail):
+                   restrict_sr, include_facets, result_types, syntax, sr_detail):
         """Search links page."""
 
         # trigger redirect to /over18
@@ -1006,10 +1039,6 @@ class FrontController(RedditController):
         else:
             faceting = None
 
-        # specify link or subreddit result types (when supported)
-        # do not officially expose search result type api yet
-        result_types = VResultTypes('type').run(request.GET.getall('type'))
-
         # no subreddit results if fielded search or structured syntax
         if syntax == 'cloudsearch' or (query and ':' in query):
             result_types = result_types - {'sr'}
@@ -1025,13 +1054,18 @@ class FrontController(RedditController):
         else:
             sr_num = 0
 
+        # inject requested sort for relevance2 test (not handled by menu validator)
+        requested_sort = request.GET.get('sort', 'relevance2')
+        if feature.is_enabled('link_relevancy') and requested_sort == 'relevance2':
+            sort = requested_sort
+
         content = None
         subreddits = None
         nav_menus = None
         cleanup_message = None
         converted_data = None
         subreddit_facets = None
-        legacy_render_class = not feature.is_enabled('subreddit_search')
+        legacy_render_class = feature.is_enabled('legacy_search') or c.user.pref_legacy_search
 
         if num > 0 and has_query:
             nav_menus = [SearchSortMenu(default=sort), TimeMenu(default=recent)]
@@ -1188,9 +1222,8 @@ class FrontController(RedditController):
     @validate(url=VRequired('url', None),
               title=VRequired('title', None),
               text=VRequired('text', None),
-              selftext=VRequired('selftext', None),
-              then=VOneOf('then', ('tb','comments'), default='comments'))
-    def GET_submit(self, url, title, text, selftext, then):
+              selftext=VRequired('selftext', None))
+    def GET_submit(self, url, title, text, selftext):
         """Submit form."""
         resubmit = request.GET.get('resubmit')
         url = sanitize_url(url)
@@ -1202,12 +1235,13 @@ class FrontController(RedditController):
 
             if links and len(links) == 1:
                 # redirect the user to the existing link's comments
-                existing_submission_url = links[0].already_submitted_link(url)
+                existing_submission_url = links[0].already_submitted_link(
+                    url, title)
                 return self.redirect(existing_submission_url)
             elif links:
                 # show the user a listing of all the other links with this url
                 # an infotext to resubmit it
-                resubmit_url = Link.resubmit_link(url)
+                resubmit_url = Link.resubmit_link(url, title)
                 sr_resubmit_url = add_sr(resubmit_url)
                 infotext = strings.multiple_submitted % sr_resubmit_url
                 res = BoringPage(
@@ -1241,7 +1275,6 @@ class FrontController(RedditController):
             show_link=c.default_sr or c.site.can_submit_link(c.user),
             show_self=((c.default_sr or c.site.can_submit_text(c.user))
                       and not request.GET.get('no_self')),
-            then=then,
         )
 
         return FormPage(_("submit"),
@@ -1290,21 +1323,6 @@ class FrontController(RedditController):
 
     def GET_catchall(self):
         return self.abort404()
-
-    @validate(period=VInt('seconds',
-                          min=sup.MIN_PERIOD,
-                          max=sup.MAX_PERIOD,
-                          default=sup.MIN_PERIOD))
-    def GET_sup(self, period):
-        #dont cache this, it's memoized elsewhere
-        c.used_cache = True
-        sup.set_expires_header()
-
-        if c.extension == 'json':
-            return sup.sup_json(period)
-        else:
-            return self.abort404()
-
 
     @require_oauth2_scope("modtraffic")
     @validate(VSponsor('link'),
@@ -1593,6 +1611,8 @@ class FormsController(RedditController):
         elif location == 'delete':
             content = PrefDelete()
         elif location == 'security':
+            if c.user.name not in g.admins:
+                return self.redirect('/prefs/')
             content = PrefSecurity()
         else:
             return self.abort404()

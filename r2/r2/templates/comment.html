@@ -21,12 +21,13 @@
 ###############################################################################
 
 <%!
+   from r2.config import feature
    from r2.lib.filters import unsafe
    from r2.lib.pages.things import CommentButtons
    from r2.lib.pages import WrappedUser
 %>
 
-<%namespace file="utils.html" import="plain_link, thing_timestamp, edited" />
+<%namespace file="utils.html" import="plain_link, thing_timestamp, edited, nsfw_stamp, quarantine_stamp" />
 <%inherit file="comment_skeleton.html"/>
 
 #####################
@@ -145,6 +146,18 @@ ${parent.midcol(cls = cls)}
 </%def>
 
 <%def name="buttons()">
+  %if c.profilepage:
+    %if thing.subreddit.quarantine:
+      <li>
+        <span class="quarantine-stamp stamp">${quarantine_stamp()}</span>
+      </li>
+    %endif
+    %if thing.nsfw:
+      <li>
+        <span class="nsfw-stamp stamp">${nsfw_stamp()}</span>
+      </li>
+    %endif
+  %endif
   ${CommentButtons(thing)}
   ${self.admintagline()}
 </%def>

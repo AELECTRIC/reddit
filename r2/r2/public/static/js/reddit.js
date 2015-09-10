@@ -210,6 +210,10 @@ function click_thing(elem) {
 }
 
 function hide_thing(elem) {
+    if ($('body').hasClass('comments-page')) {
+        return;
+    }
+
     var $thing = $(elem).thing();
 
     if ($thing.is('.comment') && $thing.has('.child:not(:empty)').length) {
@@ -316,6 +320,15 @@ function unsubscribe(reddit_name) {
     };
 };
 
+function quarantine_optout(subreddit_name) {
+    return function() {
+        if (reddit.logged) {
+            $.request("quarantine_optout", {sr: subreddit_name});
+            $.redirect("/");
+        }
+    };
+};
+
 function friend(user_name, container_name, type) {
     return function() {
         if (reddit.logged) {
@@ -331,24 +344,6 @@ function unfriend(user_name, container_name, type) {
         $.request("unfriend",
                   {name: user_name, container: container_name, type: type});
     }
-};
-
-function share(elem) {
-  var thingId = $(elem).thing_id();
-  r.analytics.fireGAEvent('share', 'shareOpen', thingId);
-
-  $.request("new_captcha");
-  $(elem).new_thing_child($(".sharelink:first").clone(true)
-                          .attr("id", "sharelink_" + thingId),
-                           false);
-  $.request("new_captcha");
-};
-
-function cancelShare(elem) {
-  var thingId = $(elem).thing_id();
-  r.analytics.fireGAEvent('share', 'shareClose', thingId);
-
-  return cancelToggleForm(elem, ".sharelink", ".share-button");
 };
 
 function reject_promo(elem) {
@@ -904,119 +899,6 @@ function populate_click_gadget() {
     }
 }
 
-var toolbar_p = function(expanded_size, collapsed_size) {
-    /* namespace for functions related to the reddit toolbar frame */
-
-    this.toggle_linktitle = function(s) {
-        $('.title, .submit, .url, .linkicon').toggle();
-        if($(s).is('.pushed-button')) {
-            $(s).parents('.middle-side').removeClass('clickable');
-        } else {
-            $(s).parents('.middle-side').addClass('clickable');
-            $('.url').children('form').children('input').focus().select();
-        }
-        return this.toggle_pushed(s);
-    };
-
-    this.toggle_pushed = function(s) {
-        s = $(s);
-        if(s.is('.pushed-button')) {
-            s.removeClass('pushed-button').addClass('popped-button');
-        } else {
-            s.removeClass('popped-button').addClass('pushed-button');
-        }
-        return false;
-    };
-
-    this.push_button = function(s) {
-        $(s).removeClass("popped-button").addClass("pushed-button");
-    };
-
-    this.pop_button = function(s) {
-        $(s).removeClass("pushed-button").addClass("popped-button");
-    };
-    
-    this.serendipity = function() {
-        this.push_button('.serendipity');
-        return true;
-    };
-    
-    this.show_panel = function() {
-        $('body', parent.inner_toolbar.document).addClass('expanded')
-    };
-        
-    this.hide_panel = function() {
-        $('body', parent.inner_toolbar.document).removeClass('expanded')
-    };
-        
-    this.resize_toolbar = function() {
-        var height = $("body").height();
-        parent.document.body.rows = height + "px, 100%";
-    };
-        
-    this.login_msg = function() {
-        $(".toolbar-status-bar").show();
-        $(".login-arrow").show();
-        this.resize_toolbar();
-        return false;
-    };
-        
-    this.top_window = function() {
-        var w = window;
-        while(w != w.parent) {
-            w = w.parent;
-        }
-        return w.parent;
-    };
-        
-    var pop_obj = null;
-    this.panel_loadurl = function(url) {
-        try {
-            var cur = window.parent.inner_toolbar.reddit_panel.location;
-            if (cur == url) {
-                return false;
-            } else {
-                if (pop_obj != null) {
-                    this.pop_button(pop_obj);
-                    pop_obj = null;
-                }
-                return true;
-            }
-        } catch (e) {
-            return true;
-        }
-    };
-        
-    var comments_on = 0;
-    this.comments_pushed = function(ctl) {
-        comments_on = ! comments_on;
-        
-        if (comments_on) {
-            this.push_button(ctl);
-            this.show_panel();
-        } else {
-            this.pop_button(ctl);
-            this.hide_panel();
-        }
-    };
-    
-    this.gourl = function(form, base_url) {
-        var url = $(form).find('input[type="text"]').val();
-        var newurl = base_url + escape(url);
-        
-        this.top_window().location.href = newurl;
-        
-        return false;
-    };
-
-    this.pref_commentspanel_hide = function() {
-        $.request('tb_commentspanel_hide');
-    };
-    this.pref_commentspanel_show = function() {
-        $.request('tb_commentspanel_show');
-    };
-};
-
 function fetch_parent(elem, parent_permalink, parent_id) {
     var thing = $(elem).thing();
     var parent = '';
@@ -1222,11 +1104,4 @@ function show_friend(account_fullname) {
                     $(this).find("a:first").debug().before(label+',');
                 }
             });
-}
-
-function save_href(link) {
-  if (!link.attr("srcurl")){
-    link.attr("srcurl", link.attr("href"));
-  }
-  return link;
 }

@@ -70,9 +70,9 @@ def make_map():
     mc('/submit', controller='front', action='submit')
 
     mc('/over18', controller='post', action='over18')
+    mc('/quarantine', controller='post', action='quarantine')
+    mc('/quarantine_optout', controller='api', action='quarantine_optout')
 
-    mc('/rules', controller='front', action='rules')
-    mc('/sup', controller='front', action='sup')
     mc('/traffic', controller='front', action='site_traffic')
     mc('/traffic/languages/:langcode', controller='front',
        action='lang_traffic', langcode='')
@@ -86,12 +86,13 @@ def make_map():
     mc('/subreddits/search', controller='front', action='search_reddits')
     mc('/subreddits/login', controller='forms', action='login')
     mc('/subreddits/:where', controller='reddits', action='listing',
-       where='popular', requirements=dict(where="popular|new|banned|employee|gold|default"))
+       where='popular', conditions={'function':not_in_sr},
+       requirements=dict(where="popular|new|banned|employee|gold|default|quarantine"))
     # If no subreddit is specified, might as well show a list of 'em.
     mc('/r', controller='redirect', action='redirect', dest='/subreddits')
 
     mc('/subreddits/mine/:where', controller='myreddits', action='listing',
-       where='subscriber',
+       where='subscriber', conditions={'function':not_in_sr},
        requirements=dict(where='subscriber|contributor|moderator'))
 
     # These routes are kept for backwards-compatibility reasons
@@ -100,10 +101,11 @@ def make_map():
     mc('/reddits/search', controller='front', action='search_reddits')
     mc('/reddits/login', controller='forms', action='login')
     mc('/reddits/:where', controller='reddits', action='listing',
-       where='popular', requirements=dict(where="popular|new|banned"))
+       where='popular', conditions={'function':not_in_sr},
+       requirements=dict(where="popular|new|banned"))
 
     mc('/reddits/mine/:where', controller='myreddits', action='listing',
-       where='subscriber',
+       where='subscriber', conditions={'function':not_in_sr},
        requirements=dict(where='subscriber|contributor|moderator'))
 
     mc('/buttons', controller='buttons', action='button_demo_page')
@@ -182,8 +184,8 @@ def make_map():
           action='spamlisting',
           requirements=dict(location='reports|spam|modqueue|unmoderated|edited'))
        connect('/about/:where', controller='userlistlisting',
-          requirements=dict(where='contributors|banned|wikibanned|wikicontributors|moderators'),
-          action='listing')
+          requirements=dict(where='contributors|banned|muted|wikibanned|'
+              'wikicontributors|moderators'), action='listing')
        connect('/about/:location', controller='front', action='editreddit',
           requirements=dict(location='edit|stylesheet|traffic|about'))
        connect('/comments', controller='comments', action='listing')
@@ -310,7 +312,11 @@ def make_map():
 
     mc('/help/:page', controller='policies', action='policy_page',
        conditions={'function':not_in_sr},
-       requirements={'page':'privacypolicy|useragreement'})
+       requirements={'page':'contentpolicy|privacypolicy|useragreement'})
+    mc('/rules', controller='redirect', action='redirect',
+        dest='/help/contentpolicy')
+    mc('/faq', controller='redirect', action='redirect',
+       dest='https://reddit.zendesk.com/')
 
     mc('/wiki/create/*page', controller='wiki', action='wiki_create')
     mc('/wiki/edit/*page', controller='wiki', action='wiki_revise')
@@ -330,15 +336,13 @@ def make_map():
     mc('/wiki/*page', controller='wiki', action='wiki_page')
     mc('/wiki/', controller='wiki', action='wiki_page')
 
-    mc('/:action', controller='wiki', requirements=dict(action="help|faq"))
+    mc('/:action', controller='wiki', requirements=dict(action="help"))
     mc('/help/*page', controller='wiki', action='wiki_redirect')
     mc('/w/*page', controller='wiki', action='wiki_redirect')
 
     mc('/goto', controller='toolbar', action='goto')
     mc('/tb/:id', controller='toolbar', action='tb')
-    mc('/toolbar/:action', controller='toolbar',
-       requirements=dict(action="toolbar|inner|login"))
-    mc('/toolbar/comments/:id', controller='toolbar', action='comments')
+    mc('/toolbar/*frame', controller='toolbar', action='redirect')
 
     mc('/c/:comment_id', controller='front', action='comment_by_id')
 
@@ -465,6 +469,8 @@ def make_map():
 
     mc("/web/log/:level", controller="weblog", action="message",
        requirements=dict(level="error"))
+
+    mc("/web/poisoning", controller="weblog", action="report_cache_poisoning")
 
     # This route handles displaying the error page and
     # graphics used in the 404/500

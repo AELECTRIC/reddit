@@ -236,15 +236,10 @@
       ${self.simple_button(_("edit"), "edit_usertext", css_class="edit-usertext")}
     </li>
   %endif
-  % if c.user_is_loggedin or not g.read_only_mode:
-  <li class="share">
-    %if thing.show_new_post_sharing:
+  % if thing.show_share:
+    <li class="share">
       <a class="post-sharing-button" href="javascript: void 0;">${_("share")}</a>
-    %else:
-      ${self.toggle_button("share-button", _("share"), _("cancel"),
-                           "share", "cancelShare", login_required = True)}
-    %endif
-  </li>
+    </li>
   % endif
   %if thing.is_loggedin:
     %if thing.saved:
@@ -285,7 +280,7 @@
            <label>Reason:</label><br/>
            <textarea name="reason" value="" ></textarea>
            <br/>
-           <a href="#"
+           <a href="javascript: void 0;"
               onclick="change_state(this, 'unpromote', complete_reject_promo)">
              submit
            </a>/
@@ -448,6 +443,15 @@
               ${ynbutton(_("block user"), _("blocked"), "block", "hide_thing")}
             %endif
           </li>
+          %if thing.can_mute:
+            <li>
+              %if getattr(thing.thing, "sr_muted", False):
+                ${ynbutton(_("unmute user"), _("unmuted"), "unmute_message_author")}
+              %else:
+                ${ynbutton(_("mute user"), _("muted"), "mute_message_author")}
+              %endif
+            </li>
+          %endif
         %endif
       %endif
     <li class="unread">

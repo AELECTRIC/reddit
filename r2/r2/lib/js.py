@@ -443,6 +443,7 @@ module["reddit-init-base"] = LocalizedModule("reddit-init-base.js",
     "lib/bootstrap.transition.js",
     "lib/bootstrap.tooltip.js",
     "lib/reddit-client-lib.js",
+    "lib/jquery.cookie.js",
     "bootstrap.tooltip.extension.js",
     "base.js",
     "preload.js",
@@ -481,7 +482,6 @@ module["reddit-init"] = LocalizedModule("reddit-init.js",
 )
 
 module["reddit"] = LocalizedModule("reddit.js",
-    "lib/jquery.cookie.js",
     "lib/jquery.url.js",
     "lib/backbone-1.0.0.js",
     "embed/custom-event.js",
@@ -511,6 +511,7 @@ module["reddit"] = LocalizedModule("reddit.js",
     "post-sharing.js",
     "expando.js",
     "saved.js",
+    "cache-poisoning-detection.js",
     "messages.js",
     PermissionsDataSource({
         "moderator": ModeratorPermissionSet,
@@ -578,6 +579,12 @@ module["highlight"] = Module("highlight.js",
 module["less"] = Module('less.js',
     'lib/less-1.4.2.js',
     should_compile=False,
+)
+
+# This needs to be separate module because we need it to load on old / bad
+# browsers that choke on reddit.js
+module["https-tester"] = Module("https-tester.js",
+    "https-tester.js"
 )
 
 def src(*names, **kwargs):

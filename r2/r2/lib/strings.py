@@ -47,6 +47,9 @@ string_dict = dict(
 
     banned_by = "removed by %s",
     banned    = "removed",
+    times_banned="removed %d times",
+    time_banned="removed at %s",
+    time_approved="approved at %s",
     reports   = "reports: %d",
     
     submitting = _("submitting..."),
@@ -69,11 +72,8 @@ string_dict = dict(
 
     user_deleted = _("your account has been deleted, but we won't judge you for it."),
 
-    cover_msg      = _("you'll need to sign in or create an account to do that"),
-    cover_disclaim = _("(don't worry, it only takes a few seconds)"),
-
     oauth_login_msg = _(
-        "Sign in or create an account to connect your reddit account with %(app)s."),
+        "Log in or sign up to connect your reddit account with %(app)s."),
 
     legal = _("I understand and agree that registration on or use of this site constitutes agreement to its %(user_agreement)s and %(privacy_policy)s."),
 
@@ -100,12 +100,6 @@ string_dict = dict(
     link_info_og_description = _("%(score)s points and %(num_comments)s comments so far on reddit"),
 
 
-    banned_subreddit_title = _("this subreddit has been banned"),
-    banned_subreddit_message = _("most likely this was done automatically by our spam filtering program. the program is still learning, and may even have some bugs, so if you feel the ban was a mistake, please submit a link to our [request a subreddit listing](%(link)s) and be sure to include the **exact name of the subreddit**."),
-    gold_only_subreddit_title = _("this subreddit is for gold members"),
-    gold_only_subreddit_message = _("you must have [reddit gold](/gold/about) to view this super secret subreddit ^[beta](/gold/about#gold-only-subreddits)"),
-    private_subreddit_title = _("this subreddit is private"),
-    private_subreddit_message = _("the moderators of this subreddit have set it to private. you must be a moderator or approved submitter to view its contents."),
     comments_panel_text = _("""The following is a sample of what Reddit users had to say about this page. The full discussion is available [here](%(fd_link)s); you can also get there by clicking the link's title (in the middle of the toolbar, to the right of the comments button)."""),
 
     submit_link = _("""You are submitting a link. The key to a successful submission is interesting content and a descriptive title."""),
@@ -117,16 +111,13 @@ string_dict = dict(
     verify_email_submit = _("you'll be able to submit more frequently once you verify your email address"),
     email_verified =  _("your email address has been verified"),
     email_verify_failed = _("Verification failed.  Please try that again"),
-    email_verify_wrong_user = _("The email verification link you've followed is for a different user. Please sign out and switch to that user or try again below."),
+    email_verify_wrong_user = _("The email verification link you've followed is for a different user. Please log out and switch to that user or try again below."),
     search_failed = _("Our search machines are under too much load to handle your request right now. :( Sorry for the inconvenience. Try again in a little bit -- but please don't mash reload; that only makes the problem worse."),
     invalid_search_query = _("I couldn't understand your query, so I simplified it and searched for \"%(clean_query)s\" instead."),
     completely_invalid_search_query = _("I couldn't understand your search query. Please try again."),
     search_help = _("You may also want to check the [search help page](%(search_help)s) for more information."),
     formatting_help_info = _('reddit uses a slightly-customized version of [Markdown](http://daringfireball.net/projects/markdown/syntax) for formatting. See below for some basics, or check [the commenting wiki page](/wiki/commenting) for more detailed help and solutions to common issues.'),
-    generic_quota_msg = _("You've submitted too many links recently. Please try again in an hour."),
-    verified_quota_msg = _("Looks like you're either a brand new user or your posts have not been doing well recently. You may have to wait a bit to post again. In the meantime feel free to [check out the reddiquette](%(reddiquette)s) or join the conversation in a different thread."),
-    unverified_quota_msg = _("Looks like you're either a brand new user or your posts have not been doing well recently. You may have to wait a bit to post again. In the meantime feel free to [check out the reddiquette](%(reddiquette)s), join the conversation in a different thread, or [verify your email address](%(verify)s)."),
-    read_only_msg = _("reddit is in \"emergency read-only mode\" right now. :( you won't be able to sign in. we're sorry, and are working frantically to fix the problem."),
+    read_only_msg = _("Reddit is in \"emergency read-only mode\" right now. :( You won't be able to log in. We're sorry and are working frantically to fix the problem."),
     heavy_load_msg = _("this page is temporarily in read-only mode due to heavy traffic."),
     gold_benefits_msg = _("reddit gold is reddit's premium membership program. Here are the benefits:\n\n* [Extra site features](/gold/about)\n* [Extra perks](/gold/partners)\n* Discuss and get help on the features and perks at /r/goldbenefits"),
     lounge_msg = _("Grab a drink and join us in /r/lounge, the super-secret members-only community that may or may not exist."),
@@ -153,7 +144,7 @@ string_dict = dict(
     gold_summary_gilding_page_link = _("You're about to give *%(recipient)s* a month of [reddit gold](/gold/about) for this submission:"),
     gold_summary_gilding_page_footer = _("You'll pay a total of %(price)s for this."),
     unvotable_message = _("sorry, this has been archived and can no longer be voted on"),
-    account_activity_blurb = _("This page shows a history of recent activity on your account. If you notice unusual activity, you should change your password immediately. Location information is guessed from your computer's IP address and may be wildly wrong, especially for visits from mobile devices. Note: due to a bug, private-use addresses (starting with 10.) sometimes show up erroneously in this list after regular use of the site."),
+    account_activity_blurb = _("This page shows a history of recent activity on your account. If you notice unusual activity, you should change your password immediately. Location information is guessed from your computer's IP address and may be wildly wrong, especially for visits from mobile devices."),
     your_current_ip_is = _("You are currently accessing reddit from this IP address: %(address)s."),
     account_activity_apps_blurb = _("""
 These apps are authorized to access your account. Signing out of all sessions

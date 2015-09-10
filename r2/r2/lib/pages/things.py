@@ -29,7 +29,7 @@ from r2.lib.menus import (
   Styled,
 )
 from r2.lib.wrapped import Wrapped
-from r2.models import LinkListing, Link, PromotedLink, Report
+from r2.models import LinkListing, Link, Message, PromotedLink, Report
 from r2.models import make_wrapper, IDBuilder, Thing
 from r2.lib.utils import tup
 from r2.lib.strings import Score
@@ -52,8 +52,6 @@ class PrintableButtons(Styled):
         show_approve = (thing.show_spam or show_ignore or
                         (is_link and approval_checkmark is None)) and not thing._deleted
 
-        show_new_post_sharing = feature.is_enabled('improved_sharing')
-
         Styled.__init__(self, style = style,
                         thing = thing,
                         fullname = thing._fullname,
@@ -71,7 +69,6 @@ class PrintableButtons(Styled):
                         show_flair = show_flair,
                         show_rescrape=show_rescrape,
                         show_givegold=show_givegold,
-                        show_new_post_sharing=show_new_post_sharing,
                         **kw)
         
 class BanButtons(PrintableButtons):
@@ -86,6 +83,9 @@ class LinkButtons(PrintableButtons):
                      c.user.name == thing.author.name)
         # do we show the report button?
         show_report = not is_author and report
+
+        show_share = ((c.user_is_loggedin or not g.read_only_mode) and
+                      not thing.subreddit.quarantine)
 
         # if they are the author, can they edit it?
         thing_editable = getattr(thing, 'editable', True)
@@ -158,6 +158,7 @@ class LinkButtons(PrintableButtons):
                                   show_rescrape=show_rescrape,
                                   show_givegold=show_givegold,
                                   show_comments = comments,
+                                  show_share=show_share,
                                   # promotion
                                   promoted = thing.promoted,
                                   is_link = True,
@@ -231,9 +232,29 @@ class MessageButtons(PrintableButtons):
         # don't allow replying to self unless it's modmail
         valid_recipient = (thing.author_id != c.user._id or
                            thing.sr_id)
+        is_muted = False
+        can_mute = False
+        if not was_comment:
+            first_message = thing
+            if getattr(thing, 'first_message', False):
+                first_message = Message._byID(thing.first_message, data=True)
+
+            if thing.sr_id:
+                sr = thing.subreddit_slow
+                if feature.is_enabled('modmail_muting', subreddit=sr.name):
+                    if (sr.is_muted(first_message.author_slow) or
+                            (first_message.to_id and
+                                sr.is_muted(first_message.recipient_slow))):
+                        is_muted = True
+
+                    if (not sr.is_moderator(thing.author_slow) and
+                            sr.is_moderator_with_perms(c.user, 'access', 'mail')):
+                        can_mute = True
+
         can_reply = (c.user_is_loggedin and
                      getattr(thing, "repliable", True) and
-                     valid_recipient)
+                     valid_recipient and
+                     not is_muted)
         can_block = True
 
         if not thing.was_comment and thing.display_author:
@@ -255,6 +276,7 @@ class MessageButtons(PrintableButtons):
                                   show_report = True,
                                   show_delete = False,
                                   can_block = can_block,
+                                  can_mute = can_mute,
                                  )
 
 # formerly ListingController.builder_wrapper

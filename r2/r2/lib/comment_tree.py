@@ -243,6 +243,7 @@ def link_comments_and_sort(link, sort):
         g.log.debug(
             "Error in comment_tree: sorter %s/%s inconsistent (missing %d e.g. %r)"
             % (link, sort, len(sorter_needed), sorter_needed[:10]))
+        g.stats.simple_event('comment_tree_bad_sorter')
         if not g.disallow_db_writes:
             update_comment_votes(Comment._byID(sorter_needed, data=True, return_dict=False))
 
@@ -391,11 +392,6 @@ def user_messages(user, update = False):
         g.permacache.set(key, trees)
     return trees
 
-def _process_message_query(inbox):
-    if hasattr(inbox, 'prewrap_fn'):
-        return [inbox.prewrap_fn(i) for i in inbox]
-    return list(inbox)
-
 
 def _load_messages(mlist):
     from r2.models import Message
@@ -411,8 +407,8 @@ def user_messages_nocache(user):
     Just like user_messages, but avoiding the cache
     """
     from r2.lib.db import queries
-    inbox = _process_message_query(queries.get_inbox_messages(user))
-    sent = _process_message_query(queries.get_sent(user))
+    inbox = queries.get_inbox_messages(user)
+    sent = queries.get_sent(user)
     messages = _load_messages(list(chain(inbox, sent)))
     return compute_message_trees(messages)
 
@@ -456,7 +452,7 @@ def subreddit_messages_nocache(sr):
     Just like user_messages, but avoiding the cache
     """
     from r2.lib.db import queries
-    inbox = _process_message_query(queries.get_subreddit_messages(sr))
+    inbox = queries.get_subreddit_messages(sr)
     messages = _load_messages(inbox)
     return compute_message_trees(messages)
 

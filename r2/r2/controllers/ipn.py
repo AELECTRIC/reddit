@@ -268,9 +268,14 @@ def send_gift(buyer, recipient, months, days, signed, giftmessage,
     if thing_fullname:
         thing = Thing._by_fullname(thing_fullname, data=True)
         thing._gild(buyer)
+        if isinstance(thing, Comment):
+            gilding_type = 'comment gild'
+        else:
+            gilding_type = 'post gild'
     else:
         thing = None
         get_hook('user.gild').call(recipient=recipient, gilder=buyer)
+        gilding_type = 'user gild'
 
     if signed:
         sender = buyer.name
@@ -285,7 +290,7 @@ def send_gift(buyer, recipient, months, days, signed, giftmessage,
         else:    
             repliable = True
 
-    create_gift_gold(buyer._id, recipient._id, days, c.start_time, signed, note)
+    create_gift_gold(buyer._id, recipient._id, days, c.start_time, signed, note, gilding_type)
 
     if months == 1:
         amount = "a month"
@@ -1347,7 +1352,7 @@ def days_from_months(months):
 def subtract_gold_days(user, days):
     user.gold_expiration -= timedelta(days=days)
     if user.gold_expiration < datetime.now(g.display_tz):
-        user.gold = False
+        admintools.degolden(user)
     user._commit()
 
 
@@ -1370,11 +1375,7 @@ def reverse_gold_purchase(transaction_id):
         goldtype = 'autorenew'
     else:
         secret = transaction.secret
-        if '{' in secret:
-            secret.strip('{}') # I goofed
-            pieces = secret.split(',')
-        else:
-            pieces = secret.split('-')
+        pieces = secret.split('-')
         goldtype = pieces[0]
 
     if goldtype == 'gift':

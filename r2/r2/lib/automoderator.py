@@ -69,6 +69,7 @@ from r2.models import (
     Message,
     ModAction,
     Report,
+    Subreddit,
     Thing,
     WikiPage,
 )
@@ -477,7 +478,9 @@ class RuleTarget(object):
             component_type="check",
         ),
         "set_sticky": RuleComponent(
-            valid_types=bool,
+            valid_types=(bool, int),
+            valid_values=set(
+                [True, False] + range(1, Subreddit.MAX_STICKIES+1)),
             valid_targets=Link,
             component_type="action",
         ),
@@ -1024,21 +1027,19 @@ class RuleTarget(object):
                 item._commit()
 
         if self.set_sticky is not None:
-            already_stickied = data["subreddit"].sticky_fullname == item._fullname
-            if already_stickied != self.set_sticky:
-                if not self.set_sticky:
-                    data["subreddit"].sticky_fullname = None
-                else:
-                    data["subreddit"].sticky_fullname = item._fullname
-                data["subreddit"]._commit()
-
-                # TODO: shouldn't need to do this here
+            stickied_fullnames = data["subreddit"].get_sticky_fullnames()
+            already_stickied = item._fullname in stickied_fullnames
+            if already_stickied != bool(self.set_sticky):
                 if self.set_sticky:
-                    log_action = "sticky"
+                    # if set_sticky is a bool, don't specify a slot
+                    if isinstance(self.set_sticky, bool):
+                        num = None
+                    else:
+                        num = self.set_sticky
+
+                    data["subreddit"].set_sticky(item, ACCOUNT, num)
                 else:
-                    log_action = "unsticky"
-                ModAction.create(
-                    data["subreddit"], ACCOUNT, log_action, target=item)
+                    data["subreddit"].remove_sticky(item, ACCOUNT)
 
         if self.set_suggested_sort is not None:
             if not item.suggested_sort:
@@ -1394,7 +1395,8 @@ class Rule(object):
             new_comment.distinguished = "yes"
             new_comment.sendreplies = False
             new_comment._commit()
-            queries.queue_vote(ACCOUNT, new_comment, True, None)
+            queries.queue_vote(ACCOUNT, new_comment, dir=True, ip=None,
+                send_event=False)
             queries.new_comment(new_comment, inbox_rel)
 
             g.stats.simple_event("automoderator.comment")

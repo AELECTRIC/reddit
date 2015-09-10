@@ -654,15 +654,13 @@ class UrlParser(object):
         On failure to find a subreddit, returns None.
         """
         from pylons import g
-        from r2.models import Subreddit, Sub, NotFound, DefaultSR
+        from r2.models import Subreddit, NotFound, DefaultSR
         try:
             if (not self.hostname or
                     is_subdomain(self.hostname, g.domain) or
                     self.hostname.startswith(g.domain)):
                 if self.path.startswith('/r/'):
                     return Subreddit._by_name(self.path.split('/')[2])
-                elif self.path.startswith(('/subreddits/', '/reddits/')):
-                    return Sub
                 else:
                     return DefaultSR()
             elif self.hostname:
@@ -1621,7 +1619,7 @@ def simple_traceback(limit):
     """
 
     stack_trace = traceback.extract_stack(limit=limit)[:-2]
-    return "\n".join(":".join((os.path.basename(filename),
+    return "\n".join("-".join((os.path.basename(filename),
                                function_name,
                                str(line_number),
                               ))

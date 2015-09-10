@@ -44,6 +44,7 @@ from pylons.i18n import _
 from r2.models import *
 import hashlib
 from r2.lib.base import abort
+from r2.config import feature
 
 class PostController(ApiController):
     @csrf_exempt
@@ -78,8 +79,34 @@ class PostController(ApiController):
         return self.redirect(u.unparse())
 
     def GET_over18(self):
-        return BoringPage(_("over 18?"), content=Over18(),
-                          show_sidebar=False).render()
+        return InterstitialPage(
+            _("over 18?"),
+            content=Over18Interstitial(),
+        ).render()
+
+    @validate(
+        dest=VDestination(default='/'),
+    )
+    def GET_quarantine(self, dest):
+        sr = UrlParser(dest).get_subreddit()
+
+        # if dest doesn't include a quarantined subreddit,
+        # redirect to the homepage or the original destination
+        if not sr:
+            return self.redirect('/')
+        elif isinstance(sr, FakeSubreddit) or sr.is_exposed(c.user):
+            return self.redirect(dest)
+
+        errpage = InterstitialPage(
+            _("quarantined"),
+            content=QuarantineInterstitial(
+                sr_name=sr.name,
+                logged_in=c.user_is_loggedin,
+                email_verified=c.user_is_loggedin and c.user.email_verified,
+            ),
+        )
+        request.environ['usable_error_content'] = errpage.render()
+        self.abort403()
 
     @validate(VModhash(fatal=False),
               over18 = nop('over18'),
@@ -98,6 +125,27 @@ class PostController(ApiController):
                 c.user._commit()
             else:
                 delete_over18_cookie()
+            return self.redirect('/')
+
+    @validate(
+        VModhash(fatal=False),
+        sr=VSRByName('sr_name'),
+        accept=VBoolean('accept'),
+        dest=VDestination(default='/'),
+    )
+    def POST_quarantine(self, sr, accept, dest):
+        can_opt_in = c.user_is_loggedin and c.user.email_verified
+
+        if accept and can_opt_in and not c.errors:
+            QuarantinedSubredditOptInsByAccount.opt_in(c.user, sr)
+            g.events.quarantine_event('quarantine_opt_in', sr,
+                request=request, context=c)
+            return self.redirect(dest)
+        else:
+            if c.user_is_loggedin and not c.errors:
+                QuarantinedSubredditOptInsByAccount.opt_out(c.user, sr)
+            g.events.quarantine_event('quarantine_interstitial_dismiss', sr,
+                request=request, context=c)
             return self.redirect('/')
 
     @csrf_exempt

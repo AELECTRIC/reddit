@@ -59,6 +59,18 @@ class HTTPTooManyRequests(webob.exc.HTTPClientError):
 webob.exc.status_map[429] = HTTPTooManyRequests
 webob.util.status_reasons[429] = HTTPTooManyRequests.title
 
+# patch out SSRFable/XSSable endpoints in older versions of weberror
+import weberror.evalexception
+
+
+# We could probably just set `.exposed = False`, but this makes me feel better
+def _stub(*args, **kwargs):
+    pass
+
+weberror.evalexception.EvalException.post_traceback = _stub
+weberror.evalexception.EvalException.relay = _stub
+
+
 #from pylons.middleware import error_mapper
 def error_mapper(code, message, environ, global_conf=None, **kw):
     if environ.get('pylons.error_call'):
@@ -101,19 +113,9 @@ def error_mapper(code, message, environ, global_conf=None, **kw):
         if environ.get('REDDIT_TAKEDOWN'):
             d['takedown'] = environ.get('REDDIT_TAKEDOWN')
 
-        #preserve x-sup-id and x-frame-options when 304ing
+        # preserve x-frame-options when 304ing
         if code == 304:
             d['allow_framing'] = 1 if c.allow_framing else 0
-
-            try:
-                # make sure that we're in a context where we can use SOP
-                # objects (error page statics appear to not be in this context)
-                response.headers
-            except TypeError:
-                pass
-            else:
-                if response.headers.has_key('x-sup-id'):
-                    d['x-sup-id'] = response.headers['x-sup-id']
 
         extension = environ.get("extension")
         if extension:
@@ -233,8 +235,6 @@ class SubredditMiddleware(object):
         if sr:
             environ['subreddit'] = sr.groups()[0]
             environ['PATH_INFO'] = self.sr_pattern.sub('', path) or '/'
-        elif path.startswith(('/subreddits', '/reddits')):
-            environ['subreddit'] = 'r'
         return self.app(environ, start_response)
 
 class DomainListingMiddleware(object):
@@ -317,7 +317,7 @@ def _wsgi_json(start_response, status_int, message=""):
         "error": status_int,
         "message": message
     })
-    return filters.websafe_json(data)
+    return [filters.websafe_json(data).encode("utf-8")]
 
 
 class LimitUploadSize(object):
@@ -427,6 +427,11 @@ class RedditApp(PylonsApp):
 
     def setup_app_env(self, environ, start_response):
         PylonsApp.setup_app_env(self, environ, start_response)
+        from pylons import g
+        # When running tests don't load controllers or register hooks. Loading the
+        # controllers currently causes db initialization and runs queries.
+        if g.env == 'unit_test':
+            return
         self.load()
 
     def load(self):

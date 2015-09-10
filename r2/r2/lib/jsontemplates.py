@@ -29,7 +29,6 @@ from r2.config import feature
 from r2.config.extensions import get_api_subtype
 from r2.lib.filters import spaceCompress, safemarkdown, _force_unicode
 from r2.models import Account, Report, Trophy
-from r2.models.subreddit import SubSR
 from r2.models.token import OAuth2Scope, extra_oauth2_scope
 import time, pytz
 from pylons import c, g, response
@@ -241,7 +240,7 @@ class ThingJsonTemplate(JsonTemplate):
             return distinguished
 
         if attr in ["num_reports", "report_reasons", "banned_by", "approved_by"]:
-            if c.user_is_loggedin and thing.user_is_moderator:
+            if c.user_is_loggedin and thing.can_ban:
                 if attr == "num_reports":
                     return thing.reported
                 elif attr == "report_reasons":
@@ -275,7 +274,7 @@ class ThingJsonTemplate(JsonTemplate):
 
 class SubredditJsonTemplate(ThingJsonTemplate):
     _data_attrs_ = ThingJsonTemplate.data_attrs(
-        accounts_active="accounts_active",
+        accounts_active="accounts_active_count",
         banner_img="banner_img",
         banner_size="banner_size",
         collapse_deleted_comments="collapse_deleted_comments",
@@ -290,12 +289,14 @@ class SubredditJsonTemplate(ThingJsonTemplate):
         icon_img="icon_img",
         icon_size="icon_size",
         # key_color="key_color",
+        lang="lang",
         over18="over_18",
         public_description="public_description",
         public_description_html="public_description_html",
         public_traffic="public_traffic",
         # related_subreddits="related_subreddits",
         hide_ads="hide_ads",
+        quarantine="quarantine",
         submission_type="link_type",
         submit_link_label="submit_link_label",
         submit_text_label="submit_text_label",
@@ -306,6 +307,7 @@ class SubredditJsonTemplate(ThingJsonTemplate):
         title="title",
         url="path",
         user_is_banned="is_banned",
+        user_is_muted="is_muted",
         user_is_contributor="is_contributor",
         user_is_moderator="is_moderator",
         user_is_subscriber="is_subscriber",
@@ -353,11 +355,9 @@ class SubredditJsonTemplate(ThingJsonTemplate):
         if attr not in self._public_attrs and not thing.can_view(c.user):
             return None
 
-        if attr == "_ups" and thing.hide_subscribers:
+        if (attr == "_ups" and
+                (thing.hide_subscribers or thing.hide_num_users_info)):
             return 0
-        # Don't return accounts_active counts in /subreddits
-        elif (attr == "accounts_active" and isinstance(c.site, SubSR)):
-            return None
         elif attr == 'description_html':
             return safemarkdown(thing.description)
         elif attr == 'public_description_html':
@@ -377,6 +377,10 @@ class SubredditJsonTemplate(ThingJsonTemplate):
         elif attr == 'is_banned':
             if c.user_is_loggedin:
                 return thing.banned
+            return None
+        elif attr == 'is_muted':
+            if c.user_is_loggedin:
+                return thing.muted
             return None
         elif attr == 'submit_text_html':
             return safemarkdown(thing.submit_text)
@@ -475,6 +479,7 @@ class TrimmedSubredditJsonTemplate(SubredditJsonTemplate):
         subscribers="_ups",
         url="path",
         user_is_banned="is_banned",
+        user_is_muted="is_muted",
         user_is_contributor="is_contributor",
         user_is_moderator="is_moderator",
         user_is_subscriber="is_subscriber",
@@ -482,7 +487,7 @@ class TrimmedSubredditJsonTemplate(SubredditJsonTemplate):
 
     def thing_attr(self, thing, attr):
         if attr in ('is_banned', 'is_contributor', 'is_moderator',
-                    'is_subscriber'):
+                'is_subscriber', 'is_muted'):
             # can't use SubredditJsonTemplate.thing_attr for these attributes
             # because it depends on the thing being a fully built/wrapped object
             # that has run through Subreddit.add_props
@@ -609,6 +614,7 @@ class LinkJsonTemplate(ThingJsonTemplate):
         edited="editted",
         gilded="gildings",
         hidden="hidden",
+        hide_score="hide_score",
         is_self="is_self",
         likes="likes",
         link_flair_css_class="flair_css_class",
@@ -621,6 +627,7 @@ class LinkJsonTemplate(ThingJsonTemplate):
         mod_reports="mod_reports",
         user_reports="user_reports",
         over_18="over_18",
+        quarantine="quarantine",
         permalink="permalink",
         removal_reason="admin_takedown",
         saved="saved",
@@ -726,8 +733,7 @@ class LinkJsonTemplate(ThingJsonTemplate):
         if c.permalink_page:
             d["upvote_ratio"] = thing.upvote_ratio
 
-        if feature.is_enabled('default_sort'):
-            d['suggested_sort'] = thing.sort_if_suggested()
+        d['suggested_sort'] = thing.sort_if_suggested()
 
         preview_object = thing.preview_image
         if preview_object:
@@ -852,7 +858,7 @@ class CommentJsonTemplate(ThingTemplate):
         if hasattr(item, "action_type"):
             data["action_type"] = item.action_type
 
-        if c.user_is_loggedin and item.user_is_moderator:
+        if c.user_is_loggedin and item.can_ban:
             data["num_reports"] = item.reported
             data["report_reasons"] = Report.get_reasons(item)
 
@@ -873,6 +879,9 @@ class CommentJsonTemplate(ThingTemplate):
             data["banned_by"] = None
 
         if c.profilepage:
+            data["quarantine"] = item.subreddit.quarantine
+            data["over_18"] = item.link.is_nsfw
+
             data["link_title"] = item.link.title
             data["link_author"] = item.link_author.name
 
@@ -1144,6 +1153,10 @@ class BannedTableItemJsonTemplate(RelTableItemJsonTemplate):
     _data_attrs_ = RelTableItemJsonTemplate.data_attrs(
         note="rel.note",
     )
+
+
+class MutedTableItemJsonTemplate(RelTableItemJsonTemplate):
+    pass
 
 
 class InvitedModTableItemJsonTemplate(RelTableItemJsonTemplate):

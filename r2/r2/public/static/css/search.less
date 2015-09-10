@@ -81,27 +81,18 @@
     .search-result-footer {
       .search-font-size();
       vertical-align: baseline;
-
-      > * {
-        // prevent unstyled children (e.g. spans) from adding to line-height
-        line-height: 1em;
-      }
     }
 
     .search-result-header {
       .search-font-size();
 
-      > * {
+      * {
         vertical-align: top;
       }
 
       .search-title {
         font-size: @search-font-large * 1px;
         margin-right: @margin-x-small * 1px;
-
-        > mark {
-          vertical-align: middle;
-        }
       }
 
       .search-subreddit-link {
@@ -192,7 +183,6 @@
       background-color: transparent;
       color: inherit;
       font-weight: bold;
-      line-height: 1em;
     }
   }
 
@@ -397,10 +387,6 @@
 
   .linkflairlabel {
     line-height: 17px;
-  }
-
-  .stamp {
-    text-transform: uppercase;
   }
 
   // undo old styles, remove when unflagged

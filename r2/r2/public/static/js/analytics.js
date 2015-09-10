@@ -210,13 +210,41 @@ r.analytics = {
     );
   },
 
+  firePageTrackingPixel: function(url, params) {
+    if (!url) { return; }
+
+    params = params || {};
+
+    var querystring = [
+      'r=' + Math.random(),
+    ];
+
+    var referrer = document.referrer || '';
+    var referrerDomain = referrer.match(/\/\/([^\/]+)/);
+
+    if (referrerDomain && referrerDomain.length > 1) {
+      querystring.push('referrer_domain=' + encodeURIComponent(referrerDomain[1]));
+    }
+
+    for(var p in params) {
+      if (params.hasOwnProperty(p)) {
+        querystring.push(
+          encodeURIComponent(p) + '=' + encodeURIComponent(params[p])
+        );
+      }
+    }
+
+    var pixel = new Image();
+    pixel.src = url + '&' + querystring.join('&');
+  },
+
   // If we passed along referring tags to this page, after it's loaded, remove them from the URL so that 
   // the user can have a clean, copy-pastable URL. This will also help avoid erroneous analytics if they paste the URL
   // in an email or something.
   stripAnalyticsParams: function() {
     var hasReplaceState = !!(window.history && window.history.replaceState);
     var params = $.url().param();
-    var stripParams = ['ref', 'ref_source'];
+    var stripParams = ['ref', 'ref_source', 'ref_campaign'];
     var strippedParams = _.omit(params, stripParams);
 
     if (hasReplaceState && !_.isEqual(params, strippedParams)) {
