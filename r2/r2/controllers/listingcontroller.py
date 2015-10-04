@@ -59,7 +59,7 @@ import socket
 
 from api_docs import api_doc, api_section
 
-from pylons import g
+from pylons import app_globals as g
 from pylons.i18n import _
 
 from datetime import timedelta
@@ -129,6 +129,9 @@ class ListingController(RedditController):
         self.after = after
         self.reverse = reverse
         self.sr_detail = sr_detail
+
+        if c.site.login_required and not c.user_is_loggedin:
+            raise UserRequiredException
 
         self.query_obj = self.query()
         self.builder_obj = self.builder()
@@ -802,26 +805,21 @@ class UserController(ListingController):
     def query(self):
         q = None
         if self.where == 'overview':
-            self.check_modified(self.vuser, 'overview')
             q = queries.get_overview(self.vuser, self.sort, self.time)
 
         elif self.where == 'comments':
-            self.check_modified(self.vuser, 'commented')
             q = queries.get_comments(self.vuser, self.sort, self.time)
 
         elif self.where == 'submitted':
-            self.check_modified(self.vuser, 'submitted')
             q = queries.get_submitted(self.vuser, self.sort, self.time)
 
         elif self.where == 'gilded':
-            self.check_modified(self.vuser, 'gilded')
             if self.show == 'given':
                 q = queries.get_user_gildings(self.vuser)
             else:
                 q = queries.get_gilded_user(self.vuser)
 
         elif self.where in ('upvoted', 'downvoted'):
-            self.check_modified(self.vuser, self.where)
             if self.where == 'upvoted':
                 q = queries.get_liked(self.vuser)
             else:
@@ -837,7 +835,6 @@ class UserController(ListingController):
             q = queries.get_saved(self.vuser, sr_id,
                                   category=self.savedcategory)
         elif self.where == 'actions':
-            self.check_modified(self.vuser, 'actions')
             if not votes_visible(self.vuser):
                 q = queries.get_overview(self.vuser, self.sort, self.time)
             else:

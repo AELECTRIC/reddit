@@ -43,7 +43,7 @@ import ImageFile
 import lxml.html
 import requests
 
-from pylons import g
+from pylons import app_globals as g
 
 from r2 import models
 from r2.config import feature
@@ -368,10 +368,7 @@ def _set_media(link, force=False, **kwargs):
     if link.subreddit_slow.quarantine:
         return
 
-    if link.is_self:
-        if not feature.is_enabled('scrape_self_posts'):
-            return
-    else:
+    if not link.is_self:
         if not force and (link.has_thumbnail or link.media_object):
             return
 

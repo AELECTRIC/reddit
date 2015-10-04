@@ -35,7 +35,9 @@ from r2.models.token import AwardClaimToken
 from r2.models.wiki import WikiPage
 
 from _pylibmc import MemcachedError
-from pylons import g, c, config
+from pylons import config
+from pylons import tmpl_context as c
+from pylons import app_globals as g
 from pylons.i18n import _
 
 from datetime import datetime, timedelta
@@ -327,7 +329,7 @@ def valid_thing(v, karma, *a, **kw):
 def valid_user(v, sr, karma, *a, **kw):
     return True
 
-def apply_updates(user):
+def apply_updates(user, timer):
     pass
 
 def update_score(obj, up_change, down_change, vote, old_valid_thing):

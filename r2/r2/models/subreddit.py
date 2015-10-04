@@ -33,7 +33,9 @@ import struct
 from pycassa import types
 from pycassa.util import convert_uuid_to_time
 from pycassa.system_manager import DATE_TYPE
-from pylons import c, g, request
+from pylons import request
+from pylons import tmpl_context as c
+from pylons import app_globals as g
 from pylons.i18n import _, N_
 
 from r2.config import feature
@@ -47,17 +49,18 @@ from account import (
 from printable import Printable
 from r2.lib.db.userrel import UserRel, MigratingUserRel
 from r2.lib.db.operators import lower, or_, and_, not_, desc
-from r2.lib.errors import UserRequiredException, RedditError
+from r2.lib.errors import RedditError
 from r2.lib.geoip import location_by_ips
 from r2.lib.memoize import memoize
 from r2.lib.permissions import ModeratorPermissionSet
-from r2.lib.utils import tup, last_modified_multi, fuzz_activity, \
-    unicode_title_to_ascii
 from r2.lib.utils import (
-    timeago,
-    summarize_markdown,
-    in_chunks,
     UrlParser,
+    fuzz_activity,
+    in_chunks,
+    summarize_markdown,
+    timeago,
+    tup,
+    unicode_title_to_ascii,
 )
 from r2.lib.cache import sgm
 from r2.lib.strings import strings, Score
@@ -72,7 +75,6 @@ from r2.lib import hooks
 from r2.models.query_cache import MergedCachedQuery
 import pycassa
 
-from r2.lib.utils import set_last_modified
 from r2.models.keyvalue import NamedGlobals
 from r2.models.wiki import WikiPage
 import os.path
@@ -133,6 +135,7 @@ class BaseSite(object):
         stylesheet=None,
         header=None,
         header_title='',
+        login_required=False,
     )
 
     def __getattr__(self, name):
@@ -332,14 +335,25 @@ class Subreddit(Thing, Printable, BaseSite):
         ('#0079d3', N_('alien blue')),
     ])
     ACCENT_COLORS = (
-        # primary colors
-        '#ff4500', '#ff8717', '#ffb000', '#94e044', '#46d160', '#0dd3bb',
-        '#24a0ed', '#0079d3',
-        # secondary colors
-        '#db0064', '#a06a42', '#c18d42', '#d4e815', '#46a508', '#25b79f',
-        '#00b985', '#4856a3', '#ff66ac', '#7e53c1',
-        # special colors
-        '#9494ff', '#d8c161', '#ffd635', '#ff585b', '#ea0027', '#fff03e',
+        '#f44336', # red
+        '#9c27b0', # purple
+        '#3f51b5', # indigo
+        '#03a9f4', # light blue
+        '#009688', # teal
+        '#8bc34a', # light green
+        '#ffeb3b', # yellow
+        '#ff9800', # orange
+        '#795548', # brown
+        '#607d8b', # blue grey
+        '#e91e63', # pink
+        '#673ab7', # deep purple
+        '#2196f3', # blue
+        '#00bcd4', # cyan
+        '#4caf50', # green
+        '#cddc39', # lime
+        '#ffc107', # amber
+        '#ff5722', # deep orange
+        '#9e9e9e', # grey
     )
 
     MAX_STICKIES = 2
@@ -504,6 +518,13 @@ class Subreddit(Thing, Printable, BaseSite):
     def allows_referrers(self):
         return self.type in {'public', 'restricted',
                              'gold_restricted', 'archived'}
+
+    @property
+    def author_slow(self):
+        if self.author_id:
+            return Account._byID(self.author_id, data=True)
+        else:
+            return None
 
     def add_moderator(self, user, **kwargs):
         if not user.modmsgtime:
@@ -772,14 +793,16 @@ class Subreddit(Thing, Printable, BaseSite):
         from r2.models import ModAction
         from r2.lib.media import upload_stylesheet
 
-        author = author if author else c.user._id36
+        if not author:
+            author = c.user
+
         if content is None:
             content = ''
         try:
             wiki = WikiPage.get(self, 'config/stylesheet')
         except tdb_cassandra.NotFound:
             wiki = WikiPage.create(self, 'config/stylesheet')
-        wr = wiki.revise(content, previous=prev, author=author, reason=reason, force=force)
+        wr = wiki.revise(content, previous=prev, author=author._id36, reason=reason, force=force)
 
         if parsed:
             self.stylesheet_url = upload_stylesheet(parsed)
@@ -791,7 +814,7 @@ class Subreddit(Thing, Printable, BaseSite):
             self.stylesheet_url_https = ""
         self._commit()
 
-        ModAction.create(self, c.user, action='wikirevise', details='Updated subreddit stylesheet')
+        ModAction.create(self, author, action='wikirevise', details='Updated subreddit stylesheet')
         return wr
 
     def is_special(self, user):
@@ -868,6 +891,11 @@ class Subreddit(Thing, Printable, BaseSite):
             return True
 
         return False
+
+    @property
+    def is_embeddable(self):
+        return (self.type not in Subreddit.private_types and
+                not self.over_18 and not self._spam and not self.quarantine)
 
     def can_demod(self, bully, victim):
         bully_rel = self.get_moderator(bully)
@@ -1023,8 +1051,7 @@ class Subreddit(Thing, Printable, BaseSite):
             automatics = Subreddit._by_name(
                 g.automatic_reddits, stale=True).values()
             automatic_ids = [sr._id for sr in automatics if sr._id in sr_ids]
-            for sr_id in automatic_ids:
-                sr_ids.remove(sr_id)
+            sr_ids = [sr_id for sr_id in sr_ids if sr_id not in automatic_ids]
         else:
             automatic_ids = []
 
@@ -1210,7 +1237,7 @@ class Subreddit(Thing, Printable, BaseSite):
     def get_tempbans(self, type=None, names=None):
         return SubredditTempBan.search(self.name, type, names)
 
-    def get_muted(self, names=None):
+    def get_muted_items(self, names=None):
         return MutedAccountsBySubreddit.search(self, names)
 
     def add_gilding_seconds(self):
@@ -1264,10 +1291,6 @@ class Subreddit(Thing, Printable, BaseSite):
         b = int(256 - (hash(str(self._id) + '  ') % 256)*(1-fade))
         return (r, g, b)
 
-    def get_accent_color(self):
-        num_colors = len(Subreddit.ACCENT_COLORS)
-        return Subreddit.ACCENT_COLORS[self._id % num_colors]
-
     def get_sticky_fullnames(self):
         """Return the fullnames of the Links stickied in the subreddit."""
         
@@ -1298,6 +1321,10 @@ class Subreddit(Thing, Printable, BaseSite):
         if not self.sticky_fullnames:
             self.sticky_fullnames = [link._fullname]
         else:
+            # don't re-sticky something that's already stickied
+            if link._fullname in self.sticky_fullnames:
+                return
+
             # XXX: have to work with a copy of the list instead of modifying
             #   it directly, because it doesn't get marked as "dirty" and
             #   saved properly unless we assign a new list to the attr
@@ -1512,32 +1539,15 @@ class FakeSubreddit(BaseSite):
 class FriendsSR(FakeSubreddit):
     name = 'friends'
     title = 'friends'
-
-    @classmethod
-    @memoize("get_important_friends", 5*60)
-    def get_important_friends(cls, user_id, max_lookup = 500, limit = 100):
-        a = Account._byID(user_id, data = True)
-        # friends are returned chronologically by date, so pick the end of the list
-        # for the most recent additions
-        friends = Account._byID(a.friends[-max_lookup:], return_dict = False,
-                                data = True)
-
-        # only include friends that have ever interacted with the site
-        last_activity = last_modified_multi(friends, "overview")
-        friends = [x for x in friends if x in last_activity]
-
-        # sort friends by most recent interactions
-        friends.sort(key = lambda x: last_activity[x], reverse = True)
-        return [x._id for x in friends[:limit]]
+    _defaults = dict(
+        FakeSubreddit._defaults,
+        login_required=True,
+    )
 
     def get_links(self, sort, time):
         from r2.lib.db import queries
 
-        if not c.user_is_loggedin:
-            raise UserRequiredException
-
-        friends = self.get_important_friends(c.user._id)
-
+        friends = c.user.get_recently_submitted_friend_ids()
         if not friends:
             return []
 
@@ -1557,11 +1567,7 @@ class FriendsSR(FakeSubreddit):
     def get_all_comments(self):
         from r2.lib.db import queries
 
-        if not c.user_is_loggedin:
-            raise UserRequiredException
-
-        friends = self.get_important_friends(c.user._id)
-
+        friends = c.user.get_recently_commented_friend_ids()
         if not friends:
             return []
 
@@ -1581,10 +1587,9 @@ class FriendsSR(FakeSubreddit):
 
     def get_gilded(self):
         from r2.lib.db.queries import get_gilded_users
-        if not c.user_is_loggedin:
-            raise UserRequiredException
 
-        friends = self.get_important_friends(c.user._id)
+        friends = c.user.friend_ids()
+
         if not friends:
             return []
 
@@ -2429,6 +2434,10 @@ class ModContribSR(MultiReddit):
     name  = None
     title = None
     query_param = None
+    _defaults = dict(
+        MultiReddit._defaults,
+        login_required=True,
+    )
 
     def __init__(self):
         # Can't lookup srs right now, c.user not set
@@ -2755,7 +2764,9 @@ def on_subreddit_unban(data):
 
 class MutedAccountsBySubreddit(object):
     @classmethod
-    def mute(cls, sr, user, muter):
+    def mute(cls, sr, user, muter, parent_message=None):
+        NUM_HOURS = 72
+
         from r2.lib.db import queries
         from r2.models import Message, ModAction
         info = {
@@ -2768,7 +2779,7 @@ class MutedAccountsBySubreddit(object):
             cls.cancel_rowkey(sr),
             cls.cancel_colkey(user),
             json.dumps(info),
-            datetime.timedelta(hours=24),
+            datetime.timedelta(hours=NUM_HOURS),
             trylater_rowkey=cls.schedule_rowkey(),
         )
 
@@ -2778,14 +2789,20 @@ class MutedAccountsBySubreddit(object):
             subject %= dict(subredditname=sr.name)
             message = _("You have been [temporarily muted](%(muting_link)s) "
                 "from r/%(subredditname)s. You will not be able to message "
-                "the moderators of r/%(subredditname)s for 24 hours.")
+                "the moderators of r/%(subredditname)s for %(num_hours)s hours.")
             message %= dict(
                 muting_link="https://reddit.zendesk.com/hc/en-us/articles/205269739",
                 subredditname=sr.name,
+                num_hours=NUM_HOURS,
             )
+            if parent_message:
+                subject = parent_message.subject
+                re = "re: "
+                if not subject.startswith(re):
+                    subject = re + subject
 
             item, inbox_rel = Message._new(muter, user, subject, message,
-                request.ip, sr=sr, from_sr=True)
+                request.ip, parent=parent_message, sr=sr, from_sr=True)
             queries.new_message(item, inbox_rel, update_modmail=True)
 
         return {user.name: result.keys()[0]}

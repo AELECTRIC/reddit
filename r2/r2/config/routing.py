@@ -24,7 +24,6 @@
 Setup your Routes options here
 """
 from routes import Mapper
-from pylons import config
 
 
 def not_in_sr(environ, results):
@@ -44,8 +43,9 @@ def partial_connect(mc, **override_args):
     return connect
 
 
-def make_map():
-    map = Mapper()
+def make_map(config):
+    map = Mapper(explicit=False)
+    map.minimization = True
     mc = map.connect
 
     # Username-relative userpage redirects, need to be defined here in case
@@ -124,7 +124,7 @@ def make_map():
     mc('/awards/received', controller='front', action='received_award')
 
     mc('/i18n', controller='redirect', action='redirect',
-       dest='http://www.reddit.com/r/i18n')
+       dest='https://www.reddit.com/r/i18n')
     mc('/feedback', controller='redirect', action='redirect',
        dest='/contact')
     mc('/contact', controller='front', action='contact_us')
@@ -395,7 +395,7 @@ def make_map():
     mc('/api/:action', controller='apiminimal',
        requirements=dict(action="new_captcha"))
     mc('/api/:type', controller='api',
-       requirements=dict(type='wikibannednote|bannednote'),
+       requirements=dict(type='wikibannednote|bannednote|mutednote'),
        action='relnote')
 
     # Route /api/multi here to prioritize it over the /api/:action rule
@@ -458,7 +458,7 @@ def make_map():
        dest='https://addons.mozilla.org/firefox/addon/socialite/')
 
     mc('/mobile', controller='redirect', action='redirect',
-       dest='http://m.reddit.com/')
+       dest='https://m.reddit.com/')
 
     # Used for showing ads
     mc("/ads/", controller="ad", action="ad")

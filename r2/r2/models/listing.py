@@ -25,7 +25,8 @@ from link import *
 from vote import *
 from report import *
 from subreddit import DefaultSR, AllSR, Frontpage
-from pylons import i18n, request, g
+from pylons import i18n, request
+from pylons import app_globals as g
 from pylons.i18n import _
 
 from r2.config import feature
@@ -227,7 +228,7 @@ class MutedListing(UserListing):
         items = UserListing.get_items(self, *a, **kw)
         wrapped_items = items[0]
         names = [item.user.name for item in wrapped_items]
-        muted = c.site.get_muted(names)
+        muted = c.site.get_muted_items(names)
         for wrapped in wrapped_items:
             MutedListing.populate_from_muted(wrapped, muted)
         return items

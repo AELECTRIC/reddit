@@ -35,7 +35,8 @@ from r2.lib.utils import tup
 from r2.lib.strings import Score
 from r2.lib.promote import *
 from datetime import datetime
-from pylons import c, g
+from pylons import tmpl_context as c
+from pylons import app_globals as g
 from pylons.i18n import _, ungettext
 
 class PrintableButtons(Styled):
@@ -43,7 +44,8 @@ class PrintableButtons(Styled):
 
     def __init__(self, style, thing,
                  show_delete = False, show_report = True,
-                 show_distinguish = False, show_marknsfw = False,
+                 show_distinguish = False, show_lock = False,
+                 show_unlock = False, show_marknsfw = False,
                  show_unmarknsfw = False, is_link=False,
                  show_flair=False, show_rescrape=False,
                  show_givegold=False, **kw):
@@ -55,7 +57,7 @@ class PrintableButtons(Styled):
         Styled.__init__(self, style = style,
                         thing = thing,
                         fullname = thing._fullname,
-                        can_ban = thing.can_ban,
+                        can_ban = thing.can_ban and not thing._deleted,
                         show_spam = thing.show_spam,
                         show_reports = thing.show_reports,
                         show_ignore = show_ignore,
@@ -64,6 +66,8 @@ class PrintableButtons(Styled):
                         show_approve = show_approve,
                         show_report = show_report,
                         show_distinguish = show_distinguish,
+                        show_lock = show_lock,
+                        show_unlock = show_unlock,
                         show_marknsfw = show_marknsfw,
                         show_unmarknsfw = show_unmarknsfw,
                         show_flair = show_flair,
@@ -92,6 +96,13 @@ class LinkButtons(PrintableButtons):
         thing_takendown = getattr(thing, 'admin_takedown', False)
         editable = is_author and thing_editable and not thing_takendown
 
+        show_lock = show_unlock = False
+        lockable = thing.can_ban and not thing.archived
+        if (lockable and feature.is_enabled('thread_locking',
+                                            subreddit=thing.subreddit.name)):
+            show_lock = not thing.locked
+            show_unlock = not show_lock
+
         show_marknsfw = show_unmarknsfw = False
         show_rescrape = False
         if thing.can_ban or is_author or (thing.promoted and c.user_is_sponsor):
@@ -103,6 +114,7 @@ class LinkButtons(PrintableButtons):
             if (not thing.is_self and
                     not (thing.has_thumbnail or thing.media_object)):
                 show_rescrape = True
+
         show_givegold = thing.can_gild and (c.permalink_page or c.profilepage)
 
         # do we show the delete button?
@@ -152,6 +164,8 @@ class LinkButtons(PrintableButtons):
                                   mod_reports=thing.mod_reports,
                                   user_reports=thing.user_reports,
                                   show_distinguish = show_distinguish,
+                                  show_lock = show_lock,
+                                  show_unlock = show_unlock,
                                   show_marknsfw = show_marknsfw,
                                   show_unmarknsfw = show_unmarknsfw,
                                   show_flair = thing.can_flair,
@@ -188,9 +202,10 @@ class CommentButtons(PrintableButtons):
         show_givegold = thing.can_gild
 
         embed_button = False
+        
+        show_admin_context = c.user_is_admin
 
-        from r2.lib import embeds
-        if thing.can_embed and embeds.embeddable_sr(thing):
+        if thing.can_embed:
             embed_button = JsButton("embed",
                 css_class="embed-comment",
                 data={
@@ -223,6 +238,7 @@ class CommentButtons(PrintableButtons):
                                   show_delete = show_delete,
                                   show_givegold=show_givegold,
                                   embed_button=embed_button,
+                                  show_admin_context=show_admin_context,
         )
 
 class MessageButtons(PrintableButtons):
@@ -232,8 +248,13 @@ class MessageButtons(PrintableButtons):
         # don't allow replying to self unless it's modmail
         valid_recipient = (thing.author_id != c.user._id or
                            thing.sr_id)
-        is_muted = False
+
+        can_reply = (c.user_is_loggedin and
+                     getattr(thing, "repliable", True) and
+                     valid_recipient)
+        can_block = True
         can_mute = False
+
         if not was_comment:
             first_message = thing
             if getattr(thing, 'first_message', False):
@@ -245,20 +266,19 @@ class MessageButtons(PrintableButtons):
                     if (sr.is_muted(first_message.author_slow) or
                             (first_message.to_id and
                                 sr.is_muted(first_message.recipient_slow))):
-                        is_muted = True
+                        can_reply = False
 
                     if (not sr.is_moderator(thing.author_slow) and
                             sr.is_moderator_with_perms(c.user, 'access', 'mail')):
                         can_mute = True
 
-        can_reply = (c.user_is_loggedin and
-                     getattr(thing, "repliable", True) and
-                     valid_recipient and
-                     not is_muted)
-        can_block = True
-
-        if not thing.was_comment and thing.display_author:
+        if not was_comment and thing.display_author:
             can_block = False
+
+        if was_comment:
+            link = thing.link_slow
+            if link.archived or link.locked:
+                can_reply = False
 
         # Allow comment-reply messages to have links to the full thread.
         if was_comment:

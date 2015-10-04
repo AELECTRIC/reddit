@@ -25,9 +25,12 @@ import json
 from collections import OrderedDict
 from decimal import Decimal
 
-from pylons import c, g, request, response
+from pylons import request, response
+from pylons import tmpl_context as c
+from pylons import app_globals as g
 from pylons.i18n import _
 from pylons.controllers.util import abort
+
 from r2.config import feature
 from r2.config.extensions import api_type, is_api
 from r2.lib import utils, captcha, promote, totp, ratelimit
@@ -37,7 +40,7 @@ from r2.lib.db import tdb_cassandra
 from r2.lib.db.operators import asc, desc
 from r2.lib.souptest import (
     SoupError,
-    SoupHostnameLengthError,
+    SoupDetectedCrasherError,
     SoupUnsupportedEntityError,
 )
 from r2.lib.template_helpers import add_sr
@@ -645,7 +648,7 @@ class VMarkdown(Validator):
                 user = c.user.name
 
             # work around CRBUG-464270
-            if isinstance(e, SoupHostnameLengthError):
+            if isinstance(e, SoupDetectedCrasherError):
                 # We want a general idea of how often this is triggered, and
                 # by what
                 g.log.warning("CHROME HAX by %s: %s" % (user, text))
@@ -2954,10 +2957,16 @@ class VMultiByPath(Validator):
 
     def run(self, path):
         path = VMultiPath.normalize(path)
+
+        name = path.split('/')[-1]
+        if not multi_name_rx.match(name):
+            return self.set_error('MULTI_NOT_FOUND', code=404)
+
         try:
             multi = LabeledMulti._byID(path)
         except tdb_cassandra.NotFound:
             return self.set_error('MULTI_NOT_FOUND', code=404)
+
         if not multi or multi.kind not in self.kinds:
             return self.set_error('MULTI_NOT_FOUND', code=404)
         if not multi or (self.require_view and not multi.can_view(c.user)):

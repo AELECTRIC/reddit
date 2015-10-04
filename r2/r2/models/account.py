@@ -20,6 +20,8 @@
 # Inc. All Rights Reserved.
 ###############################################################################
 
+import random
+
 from r2.config import feature
 from r2.lib.db.thing     import Thing, Relation, NotFound
 from r2.lib.db.operators import lower
@@ -36,7 +38,9 @@ from r2.models.last_modified import LastModified
 from r2.models.modaction import ModAction
 from r2.models.trylater import TryLater
 
-from pylons import c, g, request
+from pylons import request
+from pylons import tmpl_context as c
+from pylons import app_globals as g
 from pylons.i18n import _
 import time
 import hashlib
@@ -255,19 +259,22 @@ class Account(Thing):
     def update_last_visit(self, current_time):
         from admintools import apply_updates
 
-        apply_updates(self)
+        timer = g.stats.get_timer("account.update_last_visit")
+        timer.start()
+
+        apply_updates(self, timer)
 
         prev_visit = LastModified.get(self._fullname, "Visit")
+        timer.intermediate("get_last_modified")
+
         if prev_visit and current_time - prev_visit < timedelta(days=1):
+            timer.intermediate("set_last_modified.noop")
+            timer.stop()
             return
 
-        g.log.debug ("Updating last visit for %s from %s to %s" %
-                    (self.name, prev_visit, current_time))
-
         LastModified.touch(self._fullname, "Visit")
-
-        self.last_visit = int(time.time())
-        self._commit()
+        timer.intermediate("set_last_modified.done")
+        timer.stop()
 
     def make_cookie(self, timestr=None):
         if not self._loaded:
@@ -444,6 +451,25 @@ class Account(Thing):
         rel = rels[friend._id]
         rel.note = note
         rel._commit()
+
+    def _get_friend_ids_by(self, data_value_name, limit):
+        friend_ids = self.friend_ids()
+        if len(friend_ids) <= limit:
+            return friend_ids
+        
+        with g.stats.get_timer("friends_query.%s" % data_value_name):
+            result = self.sort_ids_by_data_value(
+                friend_ids, data_value_name, limit=limit, desc=True)
+
+        return result.fetchall()
+
+    @memoize("get_recently_submitted_friend_ids", time=10*60)
+    def get_recently_submitted_friend_ids(self, limit=100):
+        return self._get_friend_ids_by("last_submit_time", limit)
+
+    @memoize("get_recently_commented_friend_ids", time=10*60)
+    def get_recently_commented_friend_ids(self, limit=100):
+        return self._get_friend_ids_by("last_comment_time", limit)
 
     def delete(self, delete_message=None):
         self.delete_message = delete_message
@@ -634,13 +660,6 @@ class Account(Thing):
                 (self.name in g.admins or
                  self.name in g.sponsors or
                  self.name in g.employees))
-
-    @property
-    def https_forced(self):
-        """Return whether this account may only be used via HTTPS."""
-        if feature.is_enabled("require_https", user=self):
-            return True
-        return self.pref_force_https
 
     @property
     def has_gold_subscription(self):

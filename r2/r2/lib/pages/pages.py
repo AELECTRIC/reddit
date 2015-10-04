@@ -97,7 +97,9 @@ from r2.config.extensions import is_api
 from r2.lib.menus import CommentSortMenu
 
 from pylons.i18n import _, ungettext
-from pylons import c, request, g, config
+from pylons import request, config
+from pylons import tmpl_context as c
+from pylons import app_globals as g
 from pylons.controllers.util import abort
 
 from r2.lib import hooks, inventory, media
@@ -120,7 +122,12 @@ from r2.lib.menus import SubredditButton, SubredditMenu, ModeratorMailButton
 from r2.lib.menus import OffsiteButton, menu, JsNavMenu
 from r2.lib.normalized_hot import normalized_hot
 from r2.lib.providers import image_resizing
-from r2.lib.strings import plurals, rand_strings, strings, Score
+from r2.lib.strings import (
+    get_funny_translated_string,
+    plurals,
+    Score,
+    strings,
+)
 from r2.lib.utils import is_subdomain, title_to_url, query_string, UrlParser
 from r2.lib.utils import url_links_builder, median, to36
 from r2.lib.utils import trunc_time, timesince, timeuntil, weighted_lottery
@@ -244,8 +251,8 @@ class Reddit(Templated):
     extra_stylesheets  = []
 
     def __init__(self, space_compress=None, nav_menus=None, loginbox=True,
-                 infotext='', infotext_class=None, content=None,
-                 short_description='', title='',
+                 infotext='', infotext_class=None, infotext_show_icon=False,
+                 content=None, short_description='', title='',
                  robots=None, show_sidebar=True, show_chooser=False,
                  header=True, footer=True, srbar=True, page_classes=None,
                  short_title=None, show_wiki_actions=False, extra_js_config=None,
@@ -284,6 +291,7 @@ class Reddit(Templated):
             u = UrlParser(request.fullpath)
             u.set_extension("")
             u.hostname = g.domain
+            u.scheme = g.default_scheme
             if g.domain_prefix:
                 u.hostname = "%s.%s" % (g.domain_prefix, u.hostname)
             self.canonical_link = u.unparse()
@@ -304,16 +312,19 @@ class Reddit(Templated):
                     infotext = g.live_config["announcement_message"]
 
             if infotext:
-                self.infobar = InfoBar(
-                    message=infotext, extra_class=infotext_class)
+                self.infobar = RedditInfoBar(
+                    message=infotext,
+                    extra_class=infotext_class,
+                    show_icon=infotext_show_icon,
+                )
             elif (isinstance(c.site, DomainSR) and
                     is_subdomain(c.site.domain, "imgur.com")):
-                self.infobar = InfoBar(message=
+                self.infobar = RedditInfoBar(message=
                     _("imgur.com domain listings (including this one) are "
                       "currently disabled to speed up vote processing.")
                 )
             elif isinstance(c.site, AllMinus) and not c.user.gold:
-                self.infobar = InfoBar(message=strings.all_minus_gold_only,
+                self.infobar = RedditInfoBar(message=strings.all_minus_gold_only,
                                        extra_class="gold")
 
             if not c.user_is_loggedin:
@@ -507,7 +518,7 @@ class Reddit(Templated):
                 WikiPage.get(c.site, "config/automoderator")
                 buttons.append(NamedButton(
                     "automod",
-                    dest="../wiki/config/automoderator",
+                    dest="../wiki/edit/config/automoderator",
                     css_class="reddit-automod",
                 ))
             except tdb_cassandra.NotFound:
@@ -614,11 +625,12 @@ class Reddit(Templated):
                                       show_icon=False))
                 else:
                     if c.site.type == 'restricted':
-                        subtitle = _('submission in this subreddit '
-                                     'is restricted to approved submitters.')
+                        subtitle = _('Only approved users may post in this '
+                                     'community.')
                     elif c.site.type == 'gold_restricted':
-                        subtitle = _('submission in this subreddit '
-                                     'is restricted to reddit gold members.')
+                        subtitle = _('Anyone can view or comment, but only '
+                                     'Reddit Gold members can post in this '
+                                     'community.')
                     ps.append(SideBox(title=_('Submissions restricted'),
                                       css_class="submit",
                                       disabled=True,
@@ -693,9 +705,10 @@ class Reddit(Templated):
         if self.create_reddit_box and c.user_is_loggedin:
             delta = datetime.datetime.now(g.tz) - c.user._date
             if delta.days >= g.min_membership_create_community:
+                subtitles = get_funny_translated_string("create_subreddit", 2)
                 ps.append(SideBox(_('Create your own subreddit'),
                            '/subreddits/create', 'create',
-                           subtitles = rand_strings.get("create_reddit", 2),
+                           subtitles=subtitles,
                            show_cover = True, nocname=True))
 
         if c.default_sr:
@@ -1350,20 +1363,6 @@ class RegisterPage(LoginPage):
     def login_template(cls, **kw):
         return Register(**kw)
 
-class AdminModeInterstitial(BoringPage):
-    def __init__(self, dest, *args, **kwargs):
-        self.dest = dest
-        BoringPage.__init__(self, _("turn admin on"),
-                            show_sidebar=False,
-                            *args, **kwargs)
-
-    def content(self):
-        return PasswordVerificationForm(dest=self.dest)
-
-class PasswordVerificationForm(Templated):
-    def __init__(self, dest):
-        self.dest = dest
-        Templated.__init__(self)
 
 class Login(Templated):
     """The two-unit login and register form."""
@@ -1877,7 +1876,7 @@ class CommentPane(Templated):
             # buttons and do the same for loggedout users so they can use the
             # same cached page. reply buttons will be hidden client side for
             # loggedout users
-            self.can_reply = article._age < article.subreddit_slow.archive_age
+            self.can_reply = not article.archived and not article.locked
 
         builder = CommentBuilder(
             article, sort, comment=comment, context=context, num=num, **kw)
@@ -2393,10 +2392,23 @@ class MenuArea(Templated):
     def __init__(self, menus = []):
         Templated.__init__(self, menus = menus)
 
+
 class InfoBar(Templated):
     """Draws the yellow box at the top of a page for info"""
-    def __init__(self, message = '', extra_class = ''):
-        Templated.__init__(self, message = message, extra_class = extra_class)
+    def __init__(self, message='', extra_class=''):
+        Templated.__init__(self, message=message, extra_class=extra_class)
+
+
+class RedditInfoBar(InfoBar):
+    def __init__(self, message='', extra_class='', show_icon=False):
+        if not feature.is_enabled('new_info_bar'):
+            self.render_class = InfoBar
+        self.show_icon = show_icon
+        super(RedditInfoBar, self).__init__(
+            message=message,
+            extra_class=extra_class,
+        )
+
 
 class WelcomeBar(InfoBar):
     def __init__(self):
@@ -2498,6 +2510,11 @@ class Interstitial(Templated):
         )
 
 
+class AdminInterstitial(Interstitial):
+    """The admin password verification form."""
+    pass
+
+
 class BannedInterstitial(Interstitial):
     """The banned subreddit message."""
     pass
@@ -2549,7 +2566,7 @@ class SubredditTopBar(CachedTemplate):
         # template being added to the header. set c.location as an attribute so
         # it is added to the render cache key.
         self.location = c.location or "no_location"
-
+        self.my_subreddits_dropdown = self.my_reddits_dropdown()
         CachedTemplate.__init__(self, name=name, t=t, over18=c.over18)
 
     @property
@@ -2561,14 +2578,8 @@ class SubredditTopBar(CachedTemplate):
     @property
     def pop_reddits(self):
         if self._pop_reddits is None:
-            p_srs = Subreddit.default_subreddits(ids=False)
-            self._pop_reddits = [ sr for sr in p_srs
-                                  if sr.name not in g.automatic_reddits ]
+            self._pop_reddits = Subreddit.default_subreddits(ids=False)
         return self._pop_reddits
-
-    @property
-    def show_my_reddits_dropdown(self):
-        return len(self.my_reddits) > g.sr_dropdown_threshold
 
     def my_reddits_dropdown(self):
         drop_down_buttons = []
@@ -2587,7 +2598,6 @@ class SubredditTopBar(CachedTemplate):
                         sorted(self.my_reddits,
                                key = lambda sr: sr._downs,
                                reverse=True)
-                        if sr.name not in g.automatic_reddits
                         ]
         return NavMenu(srs,
                        type='flatlist', separator = '-',
@@ -2632,9 +2642,8 @@ class SubredditTopBar(CachedTemplate):
             menus.append(self.subscribed_reddits())
 
             # if the user has more than ~10 subscriptions the top bar will be
-            # completely full any anything we add to it won't be seen
+            # completely full and anything we add to it won't be seen
             if len(self.my_reddits) < 10:
-                sep = '<span class="separator">&nbsp;&ndash;&nbsp;</span>'
                 menus.append(RawString(sep))
                 menus.append(self.popular_reddits(exclude_mine=True))
 
@@ -3688,7 +3697,7 @@ class BannedTableItem(RelTableItem):
 
 class MutedTableItem(RelTableItem):
     type = 'muted'
-    cells = ('user', 'age', 'remove')
+    cells = ('user', 'age', 'remove', 'note')
 
     @property
     def executed_message(self):
@@ -4238,7 +4247,7 @@ class PromoteLinkEdit(PromoteLinkBase):
             'help_center': 'https://reddit.zendesk.com/hc/en-us/categories/200352595-Advertising',
             'selfserve': 'https://www.reddit.com/r/selfserve'
         }
-        self.infobar = InfoBar(message=message)
+        self.infobar = RedditInfoBar(message=message)
         self.price_dict = PromotionPrices.get_price_dict(self.author)
 
 
@@ -4986,8 +4995,6 @@ class ApiHelp(Templated):
         self.api_docs = api_docs
         super(ApiHelp, self).__init__(*a, **kw)
 
-class RulesPage(Templated):
-    pass
 
 class AwardReceived(Templated):
     pass

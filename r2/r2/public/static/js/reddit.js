@@ -434,6 +434,19 @@ function togglecomment(elem) {
   }
 }
 
+function toggleSrQuarantine(elem) {
+  var $toolbox = $(".quarantine-tool");
+  var $expander = $toolbox.find(".expand:first");
+  var isCollapsed = $toolbox.hasClass("collapsed");
+  $toolbox.toggleClass("collapsed noncollapsed");
+
+  if (!isCollapsed) {
+    $expander.text('[+]');
+  } else {
+    $expander.text('[–]');
+  }
+}
+
 function togglemessage(elem) {
   var message = $(elem).thing()
   var expander = message.find(".expand:first")
@@ -1020,10 +1033,10 @@ $(function() {
         // Store the user's choice for restrict_sr
         $('#search input[name="restrict_sr"]')
           .change(function() {
-            store.set('search.restrict_sr.checked', this.checked)
+            store.safeSet('search.restrict_sr.checked', this.checked)
           });
         $('#searchexpando input[name="restrict_sr"]')
-          .prop("checked", !!store.get('search.restrict_sr.checked'));
+          .prop("checked", !!store.safeGet('search.restrict_sr.checked'));
 
         $("#search_showmore").click(function(event) {
             $("#search_showmore").parent().hide();

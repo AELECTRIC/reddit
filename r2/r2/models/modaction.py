@@ -25,7 +25,9 @@ import itertools
 from uuid import UUID
 
 from pycassa.system_manager import TIME_UUID_TYPE
-from pylons import c, g, request
+from pylons import request
+from pylons import tmpl_context as c
+from pylons import app_globals as g
 from pylons.i18n import _
 
 from r2.lib.db import tdb_cassandra
@@ -55,11 +57,11 @@ class ModAction(tdb_cassandra.UuidThing):
                'removecomment', 'approvecomment', 'addmoderator',
                'invitemoderator', 'uninvitemoderator', 'acceptmoderatorinvite',
                'removemoderator', 'addcontributor', 'removecontributor',
-               'editsettings', 'editflair', 'distinguish', 'marknsfw', 
+               'editsettings', 'editflair', 'distinguish', 'marknsfw',
                'wikibanned', 'wikicontributor', 'wikiunbanned', 'wikipagelisted',
                'removewikicontributor', 'wikirevise', 'wikipermlevel',
                'ignorereports', 'unignorereports', 'setpermissions',
-               'setsuggestedsort', 'sticky', 'unsticky',
+               'setsuggestedsort', 'sticky', 'unsticky', 'lock', 'unlock',
                'muteuser', 'unmuteuser')
 
     _menu = {'banuser': _('ban user'),
@@ -92,6 +94,8 @@ class ModAction(tdb_cassandra.UuidThing):
              'setsuggestedsort': _('set suggested sort'),
              'sticky': _('sticky post'),
              'unsticky': _('unsticky post'),
+             'lock': _('lock post'),
+             'unlock': _('unlock post'),
              'muteuser': _('mute user'),
              'unmuteuser': _('unmute user'),
             }
@@ -126,6 +130,8 @@ class ModAction(tdb_cassandra.UuidThing):
              'setsuggestedsort': _('set suggested sort'),
              'sticky': _('stickied'),
              'unsticky': _('unstickied'),
+             'lock': _('locked'),
+             'unlock': _('unlocked'),
              'muteuser': _('muted'),
              'unmuteuser': _('unmuted'),
             }

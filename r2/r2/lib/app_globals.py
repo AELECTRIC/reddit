@@ -182,7 +182,6 @@ class Globals(object):
             'max_comment_parent_walk',
             'max_sr_images',
             'num_serendipity',
-            'sr_dropdown_threshold',
             'comment_visits_period',
             'butler_max_mentions',
             'min_membership_create_community',
@@ -375,12 +374,15 @@ class Globals(object):
         ConfigValue.dict(ConfigValue.str, ConfigValue.float): [
             'pennies_per_server_second',
         ],
+        ConfigValue.dict(ConfigValue.str, ConfigValue.str): [
+            'employee_approved_clients',
+        ],
         ConfigValue.dict(ConfigValue.str, ConfigValue.choice(**PERMISSIONS)): [
             'employees',
         ],
     }
 
-    def __init__(self, global_conf, app_conf, paths, **extra):
+    def __init__(self, config, global_conf, app_conf, paths, **extra):
         """
         Globals acts as a container for objects available throughout
         the life of the application.
@@ -388,6 +390,9 @@ class Globals(object):
         One instance of Globals is created by Pylons during
         application initialization and is available during requests
         via the 'g' variable.
+
+        ``config``
+            The PylonsConfig object passed in from ``config/environment.py``
 
         ``global_conf``
             The same variable used throughout ``config/middleware.py``
@@ -432,8 +437,8 @@ class Globals(object):
         
         # turn on for language support
         self.lang = getattr(self, 'site_lang', 'en')
-        self.languages, self.lang_name = \
-            get_active_langs(default_lang=self.lang)
+        self.languages, self.lang_name = get_active_langs(
+            config, default_lang=self.lang)
 
         all_languages = self.lang_name.keys()
         all_languages.sort()
@@ -518,7 +523,7 @@ class Globals(object):
             self.read_only_mode = True
 
         origin_prefix = self.domain_prefix + "." if self.domain_prefix else ""
-        self.origin = "http://" + origin_prefix + self.domain
+        self.origin = self.default_scheme + "://" + origin_prefix + self.domain
 
         self.trusted_domains = set([self.domain])
         if self.https_endpoint:
@@ -643,6 +648,11 @@ class Globals(object):
             self.live_config, type="sponsor")
         self.employees = PermissionFilteredEmployeeList(
             self.live_config, type="employee")
+
+        # Store which OAuth clients employees may use, the keys are just for
+        # readability.
+        self.employee_approved_clients = \
+            self.live_config["employee_approved_clients"].values()
 
         self.startup_timer.intermediate("zookeeper")
 

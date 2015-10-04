@@ -22,7 +22,8 @@
 
 from webob.exc import HTTPBadRequest, HTTPForbidden, status_map
 from r2.lib.utils import Storage, tup
-from pylons import g, request
+from pylons import request
+from pylons import app_globals as g
 from pylons.i18n import _
 from copy import copy
 
@@ -112,6 +113,7 @@ error_list = dict((
         ('NO_SELFS', _("that subreddit doesn't allow text posts")),
         ('NO_LINKS', _("that subreddit only allows text posts")),
         ('TOO_OLD', _("that's a piece of history now; it's too late to reply to it")),
+        ('THREAD_LOCKED', _("Comments are locked.")),
         ('BAD_CSS_NAME', _('invalid css name')),
         ('BAD_CSS', _('invalid css')),
         ('BAD_COLOR', _('invalid color')),
